@@ -102,10 +102,14 @@ export async function renderRequisicionDetalle({ params }) {
         class: 'tag danger',
         style: { marginTop: '8px', whiteSpace: 'normal', maxWidth: '100%' }
       }, [h('b', {}, 'Motivo del rechazo: '), buzonItem.motivoRechazo]),
-      buzonItem.estado === 'aprobado' && h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '6px' } },
-        'Compras está cotizando esta requisición. Se cerrará cuando se emita la orden de compra.'),
+      buzonItem.estado === 'aprobado' && h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '6px' } }, [
+        'Compras está cotizando esta requisición. ',
+        Number.isFinite(buzonItem.coberturaPct) && buzonItem.coberturaPct > 0
+          ? h('b', { style: { color: 'var(--warn)' } }, `Cobertura: ${Math.round(buzonItem.coberturaPct * 100)}%`)
+          : 'Se cerrará cuando se cubra el 100% con OC emitidas.'
+      ]),
       buzonItem.estado === 'cerrado' && h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '6px' } },
-        'Compras consolidó esta requisición en una orden de compra.')
+        `Compras cubrió esta requisición con ${(buzonItem.ocBuzonIds || (buzonItem.ocBuzonId ? [buzonItem.ocBuzonId] : [])).length} OC.`)
     ])
   ]);
 
