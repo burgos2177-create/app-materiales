@@ -80,16 +80,18 @@ export async function loadCatalogoMateriales(obraId) {
   return { meta, items: items || {} };
 }
 
-// Escribe el catálogo de materiales preservando los items con origen='ad_hoc'
-// (creados manualmente desde la app, no provenientes del XLS de OPUS).
-// Si OPUS termina exportando la misma clave/desc/unidad, el materialKey colisiona
-// y el ad_hoc queda absorbido por el de OPUS — comportamiento deseado.
+// Escribe el catálogo de materiales preservando los items que NO son OPUS
+// (ad_hoc_materiales, ad_hoc_compras, o ad_hoc legacy) — creados manualmente
+// desde alguna de las apps, no provenientes del XLS de OPUS. Si OPUS termina
+// exportando la misma clave/desc/unidad, el materialKey colisiona y el
+// ad_hoc queda absorbido por el de OPUS — comportamiento deseado.
 export async function saveCatalogoMateriales(obraId, meta, items) {
   const existing = await rread(`obras/${obraId}/catalogo/items`) || {};
   const merged = { ...items };
   let preservados = 0;
+  const ORIGEN_NO_OPUS = new Set(['ad_hoc', 'ad_hoc_materiales', 'ad_hoc_compras']);
   for (const [k, v] of Object.entries(existing)) {
-    if (v?.origen === 'ad_hoc' && !merged[k]) {
+    if (v?.origen && ORIGEN_NO_OPUS.has(v.origen) && !merged[k]) {
       merged[k] = v;
       preservados++;
     }

@@ -6,6 +6,7 @@ import {
   listRequisiciones, listRecepciones, listSalidas
 } from '../services/db.js';
 import { buildConceptosResueltos } from '../services/opus-materiales-exporter.js';
+import { isAdHoc, origenLabel } from '../services/origen.js';
 import { money, num, num0, pct } from '../util/format.js';
 
 export async function renderDashboard({ params }) {
@@ -73,7 +74,7 @@ export function computeMetrics(items, conceptos, requisiciones, resueltosMap, ex
     }
     const f = porFamilia.get(fam);
     f.materialesCount++;
-    if (m.origen === 'ad_hoc') f.adHocCount++;
+    if (isAdHoc(m.origen)) f.adHocCount++;
     f.importeOpus += m.importe || 0;
   }
 
@@ -207,7 +208,7 @@ export function computeMetrics(items, conceptos, requisiciones, resueltosMap, ex
     if (pm.cantPedida > 0) materialesPedidos++;
     if (pm.cantRecibida > 0) materialesRecibidos++;
     if (pm.cantConsumida > 0) materialesConsumidos++;
-    if (pm.m.origen === 'ad_hoc') materialesAdHoc++;
+    if (isAdHoc(pm.m.origen)) materialesAdHoc++;
     const r = resueltosMap.get(pm.matKey);
     if (r && r.all.size > 0) materialesConConcepto++;
     if (r && r.agregados.size > 0) materialesConAgregados++;
@@ -344,7 +345,7 @@ function materialesTab(metrics) {
     { key: 'clave', label: 'Clave', sortable: true,
       get: r => r.m.clave, render: r => h('span', { class: 'mono', style: { fontSize: '11px' } }, [
         r.m.clave,
-        r.m.origen === 'ad_hoc' ? h('span', { class: 'tag', style: { marginLeft: '4px', fontSize: '10px' } }, 'ad-hoc') : null
+        isAdHoc(r.m.origen) ? h('span', { class: 'tag', style: { marginLeft: '4px', fontSize: '10px' } }, origenLabel(r.m.origen)) : null
       ]) },
     { key: 'desc', label: 'Descripción', sortable: true, get: r => r.m.descripcion,
       render: r => h('span', { title: r.m.descripcion, style: { display: 'block', maxWidth: '260px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, r.m.descripcion) },

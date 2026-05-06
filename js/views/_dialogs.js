@@ -12,6 +12,7 @@ import { h, modal, toast } from '../util/dom.js';
 import { state } from '../state/store.js';
 import { createMaterialAdHoc } from '../services/db.js';
 import { computeMaterialKey } from '../services/material-keys.js';
+import { isAdHoc, isAdHocCompras, origenLabel } from '../services/origen.js';
 
 // Sentinel para consumo de material que no se carga a un concepto OPUS
 // (gasto general / indirecto). Lo exportamos para que las vistas lo
@@ -208,7 +209,13 @@ export function materialItemDialog(opts) {
       h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--text-2)', marginRight: '8px' } }, m.clave),
       h('strong', {}, m.descripcion),
       h('span', { class: 'muted', style: { marginLeft: '8px', fontSize: '12px' } }, `${m.unidad}${m.marca ? ' · ' + m.marca : ''}`),
-      m.origen === 'ad_hoc' ? h('span', { class: 'tag', style: { marginLeft: '6px', fontSize: '10px' }, title: 'Material creado en obra, no proviene del XLS de OPUS.' }, 'ad-hoc') : null
+      isAdHoc(m.origen) ? h('span', {
+        class: 'tag',
+        style: { marginLeft: '6px', fontSize: '10px' },
+        title: isAdHocCompras(m.origen)
+          ? 'Material creado por compras (no se encontró el solicitado).'
+          : 'Material creado por el almacenista en obra (no proviene del XLS de OPUS).'
+      }, origenLabel(m.origen)) : null
     ]));
 
     // Pre-cargar costo unitario desde el catálogo si no se especificó initial
@@ -605,7 +612,7 @@ export function newMaterialDialog({ obraId, onCreated }) {
           ultimaActualizacion: null,
           conceptosDirectos: [],
           refsRaw: [],
-          origen: 'ad_hoc',
+          origen: 'ad_hoc_materiales',
           creadoPor: state.user?.uid || null,
           creadoAt: Date.now(),
           archivado: false

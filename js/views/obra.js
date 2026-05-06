@@ -7,6 +7,7 @@ import {
   listMovimientosCajaChica, getCajaChicaMeta, computeSaldoCajaChica
 } from '../services/db.js';
 import { parseMaterialesXLS, buildCatalogoFromXLS } from '../services/opus-materiales-parser.js';
+import { isAdHoc } from '../services/origen.js';
 import { downloadCatalogoXLSX, buildConceptosResueltos } from '../services/opus-materiales-exporter.js';
 import { navigate } from '../state/router.js';
 import { money, dateMx, num0 } from '../util/format.js';
@@ -47,7 +48,7 @@ export async function renderObra({ params }) {
   state._materialesExtras = { requisiciones, recepciones, salidas };
   let materialesConAlguno = 0, materialesSinResolver = 0, materialesConAgregados = 0, adHocCount = 0;
   for (const [k, m] of Object.entries(catMat?.items || {})) {
-    if (m.origen === 'ad_hoc') adHocCount++;
+    if (isAdHoc(m.origen)) adHocCount++;
     const r = resueltosMap.get(k) || { directos: new Set(), agregados: new Set(), all: new Set() };
     if (r.all.size > 0) materialesConAlguno++; else materialesSinResolver++;
     if (r.agregados.size > 0) materialesConAgregados++;

@@ -6,6 +6,7 @@ import {
   listRequisiciones, listRecepciones, listSalidas
 } from '../services/db.js';
 import { buildConceptosResueltos } from '../services/opus-materiales-exporter.js';
+import { isAdHoc, isAdHocCompras, origenLabel } from '../services/origen.js';
 import { money, num, num0 } from '../util/format.js';
 
 export async function renderCatalogo({ params }) {
@@ -66,7 +67,7 @@ export async function renderCatalogo({ params }) {
       if (fam && m.familia !== fam) continue;
       if (sinResolver && r.all.size > 0) continue;
       if (conAgregados && r.agregados.size === 0) continue;
-      if (adHoc && m.origen !== 'ad_hoc') continue;
+      if (adHoc && !isAdHoc(m.origen)) continue;
       tbody.appendChild(materialRow(id, m, conceptos, r));
       visible++;
     }
@@ -157,12 +158,18 @@ function materialRow(id, m, conceptos, resueltos) {
   }
 
   const famMarca = [m.familia, m.marca].filter(Boolean).join(' · ');
-  const isAdHoc = m.origen === 'ad_hoc';
+  const adHocFlag = isAdHoc(m.origen);
 
   return h('tr', {}, [
     h('td', { class: 'mono', style: { fontSize: '11px' } }, [
       m.clave,
-      isAdHoc ? h('span', { class: 'tag', style: { marginLeft: '4px', fontSize: '10px' }, title: 'Material creado en obra (ad-hoc)' }, 'ad-hoc') : null
+      adHocFlag ? h('span', {
+        class: 'tag',
+        style: { marginLeft: '4px', fontSize: '10px' },
+        title: isAdHocCompras(m.origen)
+          ? 'Material creado por compras'
+          : 'Material creado por el almacenista en obra'
+      }, origenLabel(m.origen)) : null
     ]),
     h('td', { style: { maxWidth: '380px', overflow: 'hidden', textOverflow: 'ellipsis' }, title: m.descripcion }, m.descripcion),
     h('td', {}, m.unidad),
