@@ -1,7 +1,7 @@
 import { h, toast, modal } from '../util/dom.js';
 import { renderShell } from './shell.js';
 import { state, setState } from '../state/store.js';
-import { getObraMetaLegacy, listRequisiciones, createRequisicion, deleteRequisicion } from '../services/db.js';
+import { getObraMetaLegacy, listRequisiciones, createRequisicion, deleteRequisicion, rread } from '../services/db.js';
 import { navigate } from '../state/router.js';
 import { dateMx, num0 } from '../util/format.js';
 
@@ -10,10 +10,15 @@ export async function renderRequisicionesList({ params }) {
   setState({ obraActual: obraId });
   renderShell(crumbs(obraId, '...'), h('div', { class: 'empty' }, 'Cargando…'));
 
-  const [meta, reqs] = await Promise.all([
+  const [meta, reqs, buzon] = await Promise.all([
     getObraMetaLegacy(obraId),
-    listRequisiciones(obraId)
+    listRequisiciones(obraId),
+    rread('/shared/buzon')
   ]);
+
+  // Map buzonId → estado del buzón para mostrar el estado de compras junto al
+  // estado interno de la requisición.
+  const buzonByItemId = buzon || {};
 
   const ids = Object.keys(reqs);
   // ordenar por numero descendente
@@ -34,7 +39,7 @@ export async function renderRequisicionesList({ params }) {
         'Crea una para empezar a listar lo que hace falta en obra.')
     ]);
   } else {
-    const rows = ids.map(id => requisicionRow(obraId, id, reqs[id]));
+    const rows = ids.map(id => requisicionRow(obraId, id, reqs[id], buzonByItemId));
     body = h('div', { class: 'card', style: { padding: 0, overflow: 'auto' } }, [
       h('table', { class: 'tbl' }, [
         h('thead', {}, [h('tr', {}, [
@@ -43,6 +48,7 @@ export async function renderRequisicionesList({ params }) {
           h('th', {}, 'Solicita'),
           h('th', { class: 'num' }, 'Items'),
           h('th', {}, 'Estado'),
+          h('th', {}, 'En compras'),
           h('th', {}, 'Última actualización'),
           h('th', {}, '')
         ])]),
@@ -54,8 +60,9 @@ export async function renderRequisicionesList({ params }) {
   renderShell(crumbs(obraId, meta?.nombre), h('div', {}, [head, body]));
 }
 
-function requisicionRow(obraId, reqId, r) {
+function requisicionRow(obraId, reqId, r, buzonByItemId) {
   const itemsCount = r.items ? Object.keys(r.items).length : 0;
+  const buzonItem = r.buzonId ? buzonByItemId[r.buzonId] : null;
   return h('tr', {
     style: { cursor: 'pointer' },
     onClick: () => navigate(`/obras/${obraId}/requisiciones/${reqId}`)
@@ -65,6 +72,7 @@ function requisicionRow(obraId, reqId, r) {
     h('td', { class: 'muted' }, r.solicitadoPor?.displayName || r.solicitadoPor?.email || '—'),
     h('td', { class: 'num' }, num0(itemsCount)),
     h('td', {}, estadoBadge(r.estado)),
+    h('td', {}, buzonItem ? buzonEstadoBadge(buzonItem.estado) : h('span', { class: 'muted' }, '—')),
     h('td', { class: 'muted', style: { fontSize: '12px' } }, r.updatedAt ? new Date(r.updatedAt).toLocaleString('es-MX') : '—'),
     h('td', {},
       r.estado === 'borrador' && h('button', {
@@ -73,6 +81,16 @@ function requisicionRow(obraId, reqId, r) {
       }, 'Borrar')
     )
   ]);
+}
+
+function buzonEstadoBadge(estado) {
+  if (estado === 'recibido')    return h('span', { class: 'tag warn' }, '📥');
+  if (estado === 'en_revision') return h('span', { class: 'tag warn' }, '👁');
+  if (estado === 'aprobado')    return h('span', { class: 'tag ok' }, '✓');
+  if (estado === 'cerrado')     return h('span', { class: 'tag muted' }, '🔒');
+  if (estado === 'rechazado')   return h('span', { class: 'tag danger' }, '✕');
+  if (estado === 'huerfano')    return h('span', { class: 'tag warn' }, '⚠');
+  return h('span', { class: 'tag muted' }, estado || '—');
 }
 
 export function estadoBadge(estado) {

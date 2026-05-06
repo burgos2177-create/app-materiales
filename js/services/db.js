@@ -344,6 +344,51 @@ export async function deleteRequisicion(obraId, reqId) {
   return rremove(`obras/${obraId}/requisiciones/${reqId}`);
 }
 
+// Envía la requisición al buzón cross-app con tipo='requisicion_materiales'
+// para que app-compras la procese (cotice + emita OC). Hace 3 cosas atómicas
+// desde el punto de vista de la UI:
+//   1. Snapshot de la requisición en el item del buzón (compras no necesita
+//      leer la requisición original; el buzón es self-contained).
+//   2. Estado='recibido' en el buzón (entrada de la máquina de estados que
+//      ya usa la suite).
+//   3. En la requisición: estado='enviada' + buzonId (referencia inversa
+//      para mostrar el estado de compras en la UI del almacenista).
+//
+// Si ya existe un buzonId activo (no rechazado/huerfano), no vuelve a publicar.
+export async function enviarRequisicionABuzon(obraId, reqId, autor) {
+  const req = await rread(`obras/${obraId}/requisiciones/${reqId}`);
+  if (!req) throw new Error('Requisición no encontrada');
+  if (req.buzonId) {
+    const existente = await rread(`/shared/buzon/${req.buzonId}`);
+    if (existente && !['rechazado', 'huerfano'].includes(existente.estado)) {
+      throw new Error('Esta requisición ya está en el buzón de compras');
+    }
+  }
+  const itemsCount = req.items ? Object.keys(req.items).length : 0;
+  if (itemsCount === 0) throw new Error('La requisición no tiene items');
+
+  const buzonItem = {
+    tipo: 'requisicion_materiales',
+    origenApp: 'materiales',
+    obraId,
+    reqId,
+    numero: req.numero,
+    fechaSolicitud: req.fechaSolicitud,
+    items: req.items || {},
+    autor: autor || req.solicitadoPor || null,
+    estado: 'recibido',
+    creadoAt: Date.now()
+  };
+  const buzonId = await rpush('/shared/buzon', buzonItem);
+  await rupdate(`obras/${obraId}/requisiciones/${reqId}`, {
+    estado: 'enviada',
+    enviadaAt: Date.now(),
+    buzonId,
+    updatedAt: Date.now()
+  });
+  return buzonId;
+}
+
 // === Caja chica por obra ===
 //
 // Vive en /shared/cajaChica/{obraId} para que appsogrub (contador) la lea/

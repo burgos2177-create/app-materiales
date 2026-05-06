@@ -2,10 +2,11 @@ import { h, toast, modal } from '../util/dom.js';
 import { renderShell } from './shell.js';
 import { state, setState } from '../state/store.js';
 import {
-  getObraMetaLegacy, getRequisicion,
+  getObraMetaLegacy, getRequisicion, getBuzonItem,
   loadCatalogoMateriales, loadCatalogoConceptos,
   addRequisicionItem, updateRequisicionItem, removeRequisicionItem,
   setRequisicionEstado, addRequisicionItemsBatch,
+  enviarRequisicionABuzon,
   listRequisiciones, listRecepciones, listSalidas
 } from '../services/db.js';
 import { computeStockByMaterial } from '../services/stock.js';
@@ -35,8 +36,12 @@ export async function renderRequisicionDetalle({ params }) {
   }
   setState({ catalogo: catMat, conceptos: catCon?.conceptos || null });
 
+  // Estado del buzón en compras (si la requisición ya fue enviada).
+  const buzonItem = req.buzonId ? await getBuzonItem(req.buzonId) : null;
+  const buzonActivo = buzonItem && !['rechazado', 'huerfano'].includes(buzonItem.estado);
+
   const folio = `R-${String(req.numero || 0).padStart(4, '0')}`;
-  const editable = req.estado === 'borrador';
+  const editable = req.estado === 'borrador' && !buzonActivo;
 
   // Para el panel informativo del modal: cuánto se ha pedido en OTRAS
   // requisiciones activas (excluyendo la actual y las canceladas) por material.
@@ -52,7 +57,7 @@ export async function renderRequisicionDetalle({ params }) {
   const stockMap = computeStockByMaterial(recepciones, salidas);
 
   const head = h('div', { class: 'row' }, [
-    h('h1', {}, [folio, ' ', estadoBadge(req.estado)]),
+    h('h1', {}, [folio, ' ', estadoBadge(req.estado), buzonItem && ' ', buzonItem && buzonBadge(buzonItem.estado)]),
     h('div', { style: { flex: 1 } }),
     editable && h('button', {
       class: 'btn primary',
@@ -61,12 +66,14 @@ export async function renderRequisicionDetalle({ params }) {
     editable && h('button', {
       class: 'btn',
       onClick: () => onEnviar(obraId, reqId, req)
-    }, '↗ Enviar requisición'),
+    }, '↗ Enviar a compras'),
     editable && h('button', {
       class: 'btn ghost',
       onClick: () => onCancelar(obraId, reqId)
     }, 'Cancelar'),
-    !editable && req.estado === 'enviada' && h('button', {
+    // Reabrir solo si no hay buzón activo (legacy, o el item del buzón fue
+    // rechazado/huérfano y se quiere editar para reenviar).
+    !editable && req.estado === 'enviada' && !buzonActivo && h('button', {
       class: 'btn ghost',
       onClick: () => onReabrir(obraId, reqId)
     }, '↺ Reabrir')
@@ -81,6 +88,24 @@ export async function renderRequisicionDetalle({ params }) {
       kv('Fecha solicitud', req.fechaSolicitud ? new Date(req.fechaSolicitud).toLocaleString('es-MX') : '—'),
       req.enviadaAt && kv('Enviada', new Date(req.enviadaAt).toLocaleString('es-MX')),
       req.canceladaAt && kv('Cancelada', new Date(req.canceladaAt).toLocaleString('es-MX'))
+    ]),
+    buzonItem && h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--border)' } }, [
+      h('h3', {}, 'Estado en compras'),
+      h('div', { class: 'row' }, [
+        buzonBadge(buzonItem.estado),
+        h('span', { class: 'muted', style: { fontSize: '12px' } },
+          buzonItem.actualizadoAt
+            ? `actualizado ${new Date(buzonItem.actualizadoAt).toLocaleString('es-MX')}`
+            : (buzonItem.creadoAt ? `recibido ${new Date(buzonItem.creadoAt).toLocaleString('es-MX')}` : ''))
+      ]),
+      buzonItem.estado === 'rechazado' && buzonItem.motivoRechazo && h('div', {
+        class: 'tag danger',
+        style: { marginTop: '8px', whiteSpace: 'normal', maxWidth: '100%' }
+      }, [h('b', {}, 'Motivo del rechazo: '), buzonItem.motivoRechazo]),
+      buzonItem.estado === 'aprobado' && h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '6px' } },
+        'Compras está cotizando esta requisición. Se cerrará cuando se emita la orden de compra.'),
+      buzonItem.estado === 'cerrado' && h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '6px' } },
+        'Compras consolidó esta requisición en una orden de compra.')
     ])
   ]);
 
@@ -222,20 +247,38 @@ async function onEnviar(obraId, reqId, req) {
   const itemsCount = req.items ? Object.keys(req.items).length : 0;
   if (itemsCount === 0) { toast('La requisición no tiene items', 'danger'); return; }
   await modal({
-    title: 'Enviar requisición',
+    title: 'Enviar requisición a compras',
     body: h('div', {}, [
-      h('p', {}, [`Se enviará la requisición R-${String(req.numero).padStart(4, '0')} con `, h('b', {}, itemsCount), ' items.']),
+      h('p', {}, [`Se enviará la requisición R-${String(req.numero).padStart(4, '0')} con `, h('b', {}, itemsCount), ' items al departamento de compras.']),
       h('p', { class: 'muted', style: { fontSize: '12px' } },
-        'Una vez enviada, ya no se puede editar. Compras la convierte en orden de compra. Si necesitas modificarla, podrás reabrirla mientras compras no la haya tomado.')
+        'Compras la cotiza con proveedores y emite una orden de compra. Mientras esté en proceso no se puede editar; si compras la rechaza, se puede reabrir para corregir y reenviar.')
     ]),
     confirmLabel: 'Enviar',
     onConfirm: async () => {
-      await setRequisicionEstado(obraId, reqId, 'enviada');
-      toast('Requisición enviada', 'ok');
-      renderRequisicionDetalle({ params: { id: obraId, reqid: reqId } });
-      return true;
+      try {
+        const u = state.user;
+        await enviarRequisicionABuzon(obraId, reqId, {
+          uid: u.uid, displayName: u.displayName || '', email: u.email || ''
+        });
+        toast('Requisición enviada a compras', 'ok');
+        renderRequisicionDetalle({ params: { id: obraId, reqid: reqId } });
+        return true;
+      } catch (err) {
+        toast('Error: ' + err.message, 'danger');
+        return false;
+      }
     }
   });
+}
+
+function buzonBadge(estado) {
+  if (estado === 'recibido') return h('span', { class: 'tag warn' }, '📥 Recibida en compras');
+  if (estado === 'en_revision') return h('span', { class: 'tag warn' }, '👁 En revisión por compras');
+  if (estado === 'aprobado') return h('span', { class: 'tag ok' }, '✓ Cotizando');
+  if (estado === 'cerrado') return h('span', { class: 'tag muted' }, '🔒 Cerrada · con OC');
+  if (estado === 'rechazado') return h('span', { class: 'tag danger' }, '✕ Rechazada por compras');
+  if (estado === 'huerfano') return h('span', { class: 'tag warn' }, '⚠ Huérfana');
+  return h('span', { class: 'tag muted' }, estado || '');
 }
 
 async function onCancelar(obraId, reqId) {
