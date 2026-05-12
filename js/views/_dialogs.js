@@ -956,10 +956,41 @@ export function conceptoPickerDialog({ conceptos, excludeKeys = new Set(), onPic
 //                    mutar su copia en memoria y refrescar la fila).
 export function editMaterialMetaDialog({
   obraId, materialKey, material,
+  items = null,
   familiasExistentes = [], marcasExistentes = [],
   onSaved
 }) {
+  // Si nos pasaron `items`, derivamos todo desde ahí (preferido) — así podemos
+  // filtrar subfamilias por familia. Si solo nos pasaron los arrays planos
+  // (legacy), nos quedamos con datalists globales sin filtrado.
+  const norm = (s) => (s || '').trim().toLowerCase();
+  let familiasSorted, marcasSorted, subPorFamilia;
+  if (items) {
+    const famsMap = new Map();   // norm → display original
+    const marcas = new Set();
+    subPorFamilia = new Map();   // norm familia → Set<subfamilia>
+    for (const m of Object.values(items)) {
+      const f = (m.familia || '').trim();
+      const s = (m.subfamilia || '').trim();
+      const mar = (m.marca || '').trim();
+      if (f) famsMap.set(norm(f), f);
+      if (mar) marcas.add(mar);
+      if (f && s) {
+        const k = norm(f);
+        if (!subPorFamilia.has(k)) subPorFamilia.set(k, new Set());
+        subPorFamilia.get(k).add(s);
+      }
+    }
+    familiasSorted = [...famsMap.values()].sort((a, b) => a.localeCompare(b, 'es'));
+    marcasSorted = [...marcas].sort((a, b) => a.localeCompare(b, 'es'));
+  } else {
+    familiasSorted = [...new Set(familiasExistentes.filter(Boolean))].sort();
+    marcasSorted = [...new Set(marcasExistentes.filter(Boolean))].sort();
+    subPorFamilia = null;
+  }
+
   const familiaDLId = 'dl-fam-' + Math.random().toString(36).slice(2, 8);
+  const subDLId = 'dl-sub-' + Math.random().toString(36).slice(2, 8);
   const marcaDLId = 'dl-mar-' + Math.random().toString(36).slice(2, 8);
 
   // OJO: `list` en HTMLInputElement es getter-only; hay que asignarlo como
@@ -970,12 +1001,32 @@ export function editMaterialMetaDialog({
   const marca = h('input', { value: material.marca || '', placeholder: 'Marca (opcional)' });
   const proveedor = h('input', { value: material.proveedor || '', placeholder: 'Proveedor (opcional)' });
   familia.setAttribute('list', familiaDLId);
+  subfamilia.setAttribute('list', subDLId);
   marca.setAttribute('list', marcaDLId);
 
   const famDL = h('datalist', { id: familiaDLId },
-    [...new Set(familiasExistentes.filter(Boolean))].sort().map(v => h('option', { value: v })));
+    familiasSorted.map(v => h('option', { value: v })));
+  const subDL = h('datalist', { id: subDLId });
   const marDL = h('datalist', { id: marcaDLId },
-    [...new Set(marcasExistentes.filter(Boolean))].sort().map(v => h('option', { value: v })));
+    marcasSorted.map(v => h('option', { value: v })));
+
+  // Refresca las opciones de subfamilia según la familia actualmente escrita.
+  // Si la familia no existe (o no hay items), el datalist queda vacío — buen
+  // hint visual de que la familia es nueva y no tiene subfamilias previas.
+  function refreshSubDL() {
+    subDL.innerHTML = '';
+    if (!subPorFamilia) return;
+    const subs = subPorFamilia.get(norm(familia.value));
+    if (!subs) return;
+    for (const s of [...subs].sort((a, b) => a.localeCompare(b, 'es'))) {
+      subDL.appendChild(h('option', { value: s }));
+    }
+  }
+  // Cualquier interacción que cambie el valor: tipear, elegir del autocomplete (change),
+  // o pegar.
+  familia.addEventListener('input', refreshSubDL);
+  familia.addEventListener('change', refreshSubDL);
+  refreshSubDL();
 
   const overrides = material.manualOverrides || {};
   const yaEditados = ['familia', 'subfamilia', 'marca', 'proveedor'].filter(f => overrides[f]);
@@ -996,7 +1047,7 @@ export function editMaterialMetaDialog({
       h('div', { class: 'field' }, [h('label', {}, 'Marca'), marca]),
       h('div', { class: 'field' }, [h('label', {}, 'Proveedor'), proveedor])
     ]),
-    famDL, marDL,
+    famDL, subDL, marDL,
     yaEditados.length > 0
       ? h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '8px' } },
           `Este material tiene ediciones manuales en: ${yaEditados.join(', ')}. Se mantienen al re-importar el XLS hasta que OPUS las absorba (subir el XLS exportado desde esta app).`)
@@ -1222,13 +1273,43 @@ export function manageFamiliasDialog({ obraId, items, onChange }) {
     for (const f of familiasUnicas()) bulkFamSel.appendChild(h('option', { value: f }, f));
     if ([...bulkFamSel.options].some(o => o.value === prev)) bulkFamSel.value = prev;
   }
+  // Map: norm(familia) → Set<subfamilia>. Permite filtrar el datalist de
+  // subfamilia a las que existen para la familia que el usuario está tecleando.
+  function subsPorFamilia() {
+    const norm = (s) => (s || '').trim().toLowerCase();
+    const out = new Map();
+    for (const m of Object.values(items)) {
+      const f = (m.familia || '').trim();
+      const s = (m.subfamilia || '').trim();
+      if (!f || !s) continue;
+      const k = norm(f);
+      if (!out.has(k)) out.set(k, new Set());
+      out.get(k).add(s);
+    }
+    return out;
+  }
   function repoblarDatalists() {
     const fams = familiasUnicas();
-    const subs = [...new Set(Object.values(items).map(m => (m.subfamilia || '').trim()).filter(Boolean))].sort();
     const famDL = document.getElementById(newFamDLId);
     const subDL = document.getElementById(newSubDLId);
     if (famDL) { famDL.innerHTML = ''; for (const f of fams) famDL.appendChild(h('option', { value: f })); }
-    if (subDL) { subDL.innerHTML = ''; for (const s of subs) subDL.appendChild(h('option', { value: s })); }
+    if (subDL) {
+      subDL.innerHTML = '';
+      const fam = (bulkNewFam.value || '').trim().toLowerCase();
+      const map = subsPorFamilia();
+      // Si hay familia escrita: solo sus subfamilias. Si está vacía: todas
+      // (para que el usuario pueda explorar antes de elegir familia).
+      let subs;
+      if (fam) {
+        subs = [...(map.get(fam) || new Set())];
+      } else {
+        const set = new Set();
+        for (const s of map.values()) for (const x of s) set.add(x);
+        subs = [...set];
+      }
+      subs.sort((a, b) => a.localeCompare(b, 'es'));
+      for (const s of subs) subDL.appendChild(h('option', { value: s }));
+    }
   }
 
   function matchSet() {
@@ -1267,6 +1348,11 @@ export function manageFamiliasDialog({ obraId, items, onChange }) {
   bulkSearch.addEventListener('input', renderBulk);
   bulkFamSel.addEventListener('change', renderBulk);
   bulkSoloSin.addEventListener('change', renderBulk);
+  // Cuando cambia la "Asignar familia", repoblar SOLO las subfamilias de esa
+  // familia para evitar que el usuario invente variantes ("Cable" vs "cables").
+  // Si el campo familia se vacía, mostramos todas como fallback.
+  bulkNewFam.addEventListener('input', repoblarDatalists);
+  bulkNewFam.addEventListener('change', repoblarDatalists);
 
   aplicarBtn.addEventListener('click', async () => {
     const matches = matchSet();

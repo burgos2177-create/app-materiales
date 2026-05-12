@@ -42,9 +42,7 @@ export async function renderCatalogo({ params }) {
     const m = items[id];
     if (!m) return;
     editMaterialMetaDialog({
-      obraId, materialKey: id, material: m,
-      familiasExistentes: Object.values(items).map(x => x.familia),
-      marcasExistentes: Object.values(items).map(x => x.marca),
+      obraId, materialKey: id, material: m, items,
       onSaved: (patch, changedFields) => {
         // Mutamos el item en memoria para reflejar en la lista de filtros y la fila.
         // Solo marcamos overrides en los campos que cambiaron (espejo de la lógica del DB).
