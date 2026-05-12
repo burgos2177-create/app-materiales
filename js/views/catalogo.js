@@ -70,6 +70,8 @@ export async function renderCatalogo({ params }) {
   const soloSinResolver = h('input', { type: 'checkbox' });
   const soloAgregados = h('input', { type: 'checkbox' });
   const soloAdHoc = h('input', { type: 'checkbox' });
+  const soloSinFamilia = h('input', { type: 'checkbox' });
+  const soloSinMarca = h('input', { type: 'checkbox' });
 
   const tbody = h('tbody', {});
   const counter = h('div', { class: 'muted', style: { fontSize: '12px' } }, '');
@@ -80,6 +82,8 @@ export async function renderCatalogo({ params }) {
     const sinResolver = soloSinResolver.checked;
     const conAgregados = soloAgregados.checked;
     const adHoc = soloAdHoc.checked;
+    const sinFam = soloSinFamilia.checked;
+    const sinMar = soloSinMarca.checked;
     let visible = 0;
     let totalAgregados = 0;
     tbody.innerHTML = '';
@@ -92,6 +96,8 @@ export async function renderCatalogo({ params }) {
       if (sinResolver && r.all.size > 0) continue;
       if (conAgregados && r.agregados.size === 0) continue;
       if (adHoc && !isAdHoc(m.origen)) continue;
+      if (sinFam && (m.familia || '').trim() !== '') continue;
+      if (sinMar && (m.marca || '').trim() !== '') continue;
       tbody.appendChild(materialRow(id, m, conceptos, r, { canEdit, onEditMeta: openEdit }));
       visible++;
     }
@@ -104,9 +110,11 @@ export async function renderCatalogo({ params }) {
   soloSinResolver.addEventListener('change', refresh);
   soloAgregados.addEventListener('change', refresh);
   soloAdHoc.addEventListener('change', refresh);
+  soloSinFamilia.addEventListener('change', refresh);
+  soloSinMarca.addEventListener('change', refresh);
 
   const filtersBar = h('div', { class: 'card' }, [
-    h('div', { class: 'row' }, [
+    h('div', { class: 'row', style: { flexWrap: 'wrap', rowGap: '6px' } }, [
       search, familiaSel,
       h('label', { class: 'row', style: { gap: '6px', cursor: 'pointer' } }, [
         soloSinResolver, h('span', { class: 'muted', style: { fontSize: '12px' } }, 'Sin concepto')
@@ -116,6 +124,12 @@ export async function renderCatalogo({ params }) {
       ]),
       h('label', { class: 'row', style: { gap: '6px', cursor: 'pointer' } }, [
         soloAdHoc, h('span', { class: 'muted', style: { fontSize: '12px' } }, 'Ad-hoc')
+      ]),
+      h('label', { class: 'row', style: { gap: '6px', cursor: 'pointer' } }, [
+        soloSinFamilia, h('span', { class: 'muted', style: { fontSize: '12px' } }, 'Sin familia')
+      ]),
+      h('label', { class: 'row', style: { gap: '6px', cursor: 'pointer' } }, [
+        soloSinMarca, h('span', { class: 'muted', style: { fontSize: '12px' } }, 'Sin marca')
       ]),
       h('div', { style: { flex: 1 } }),
       counter
