@@ -188,26 +188,31 @@ function materialRow(id, m, conceptos, resueltos, opts = {}) {
   const adHocFlag = isAdHoc(m.origen);
   const edited = m.manualOverrides && Object.values(m.manualOverrides).some(Boolean);
 
-  // Celda Familia / Marca: clickable cuando hay permiso. Si está vacía,
-  // mostramos un placeholder "+ asignar" en lugar de un espacio en blanco.
+  // Celda Familia / Marca: botón explícito para editar cuando hay permiso.
   let famMarcaCell;
   if (canEdit && onEditMeta) {
-    const inner = famMarca
-      ? h('span', {}, [
-          famMarca,
-          edited ? h('span', {
-            class: 'tag',
-            style: { marginLeft: '6px', fontSize: '10px' },
-            title: 'Editado en la app. Se preserva contra re-imports de OPUS hasta que el XLS exportado se cargue en OPUS.'
-          }, '✎') : null
-        ])
-      : h('span', { style: { color: 'var(--accent)', fontStyle: 'italic' } }, '+ asignar familia / marca');
-    famMarcaCell = h('td', {
-      class: 'muted',
-      style: { fontSize: '11px', cursor: 'pointer', userSelect: 'none' },
+    const editBtn = h('button', {
+      class: 'btn ghost sm',
+      style: { fontSize: '11px', padding: '2px 8px', whiteSpace: 'nowrap' },
       title: 'Editar familia, subfamilia, marca y proveedor',
-      onClick: () => onEditMeta(id)
-    }, inner);
+      onClick: (e) => { e.stopPropagation(); onEditMeta(id); }
+    }, famMarca ? '✎ Editar' : '+ Asignar');
+
+    famMarcaCell = h('td', { class: 'muted', style: { fontSize: '11px' } }, [
+      h('div', { class: 'row', style: { gap: '6px', alignItems: 'center', justifyContent: 'space-between' } }, [
+        famMarca
+          ? h('span', {}, [
+              famMarca,
+              edited ? h('span', {
+                class: 'tag',
+                style: { marginLeft: '4px', fontSize: '10px' },
+                title: 'Editado en la app. Se preserva contra re-imports de OPUS hasta que el XLS exportado se cargue en OPUS.'
+              }, '✎') : null
+            ])
+          : h('span', { class: 'muted', style: { fontStyle: 'italic' } }, '—'),
+        editBtn
+      ])
+    ]);
   } else {
     famMarcaCell = h('td', { class: 'muted', style: { fontSize: '11px' } }, famMarca);
   }
