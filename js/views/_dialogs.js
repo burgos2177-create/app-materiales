@@ -10,7 +10,7 @@
 
 import { h, modal, toast } from '../util/dom.js';
 import { state } from '../state/store.js';
-import { createMaterialAdHoc } from '../services/db.js';
+import { createMaterialAdHoc, updateMaterialMeta } from '../services/db.js';
 import { computeMaterialKey } from '../services/material-keys.js';
 import { isAdHoc, isAdHocCompras, origenLabel } from '../services/origen.js';
 
@@ -939,4 +939,100 @@ export function conceptoPickerDialog({ conceptos, excludeKeys = new Set(), onPic
   }, card);
   document.getElementById('modal-root').appendChild(backdrop);
   refresh();
+}
+
+// === editMaterialMetaDialog ===
+//
+// Edita los campos de catálogo del material que NO vienen de movimientos:
+// familia, subfamilia, marca y proveedor. Se persiste con manualOverrides
+// para que el re-import del XLS de OPUS no pise la edición. Como `compras`
+// lee del mismo path `/shared/materiales/{obraId}/catalogo/items/...`, el
+// cambio se ve allá automáticamente.
+//
+// opts:
+//   obraId, materialKey, material — del catálogo en memoria.
+//   familiasExistentes, marcasExistentes — arrays para autocomplete (datalist).
+//   onSaved(patch) — callback con los campos actualizados (la vista debe
+//                    mutar su copia en memoria y refrescar la fila).
+export function editMaterialMetaDialog({
+  obraId, materialKey, material,
+  familiasExistentes = [], marcasExistentes = [],
+  onSaved
+}) {
+  const familiaDLId = 'dl-fam-' + Math.random().toString(36).slice(2, 8);
+  const marcaDLId = 'dl-mar-' + Math.random().toString(36).slice(2, 8);
+
+  const familia = h('input', { value: material.familia || '', placeholder: 'Familia (p.ej. ELECTRICIDAD)', list: familiaDLId, autofocus: true });
+  const subfamilia = h('input', { value: material.subfamilia || '', placeholder: 'Subfamilia (opcional)' });
+  const marca = h('input', { value: material.marca || '', placeholder: 'Marca (opcional)', list: marcaDLId });
+  const proveedor = h('input', { value: material.proveedor || '', placeholder: 'Proveedor (opcional)' });
+
+  const famDL = h('datalist', { id: familiaDLId },
+    [...new Set(familiasExistentes.filter(Boolean))].sort().map(v => h('option', { value: v })));
+  const marDL = h('datalist', { id: marcaDLId },
+    [...new Set(marcasExistentes.filter(Boolean))].sort().map(v => h('option', { value: v })));
+
+  const overrides = material.manualOverrides || {};
+  const yaEditados = ['familia', 'subfamilia', 'marca', 'proveedor'].filter(f => overrides[f]);
+
+  const body = h('div', {}, [
+    h('div', { class: 'muted', style: { fontSize: '12px', marginBottom: '10px' } }, [
+      h('div', {}, [
+        h('span', { class: 'mono', style: { fontSize: '11px', marginRight: '6px' } }, material.clave),
+        h('span', {}, material.descripcion)
+      ]),
+      h('div', { style: { fontSize: '11px', marginTop: '2px' } }, material.unidad || '')
+    ]),
+    h('div', { class: 'grid-2' }, [
+      h('div', { class: 'field' }, [h('label', {}, 'Familia'), familia]),
+      h('div', { class: 'field' }, [h('label', {}, 'Subfamilia'), subfamilia])
+    ]),
+    h('div', { class: 'grid-2' }, [
+      h('div', { class: 'field' }, [h('label', {}, 'Marca'), marca]),
+      h('div', { class: 'field' }, [h('label', {}, 'Proveedor'), proveedor])
+    ]),
+    famDL, marDL,
+    yaEditados.length > 0
+      ? h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '8px' } },
+          `Este material tiene ediciones manuales en: ${yaEditados.join(', ')}. Se mantienen al re-importar el XLS hasta que OPUS las absorba (subir el XLS exportado desde esta app).`)
+      : h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '8px' } },
+          'Los cambios persisten contra re-imports de OPUS. Exporta el XLS desde la obra y súbelo a OPUS para que también los tenga. Compras ve el cambio automáticamente.')
+  ]);
+
+  modal({
+    title: 'Editar familia / marca', body, confirmLabel: 'Guardar', size: 'lg',
+    onConfirm: async () => {
+      const patch = {
+        familia: familia.value,
+        subfamilia: subfamilia.value,
+        marca: marca.value,
+        proveedor: proveedor.value
+      };
+      try {
+        const editor = state.user
+          ? { uid: state.user.uid, displayName: state.user.displayName || state.user.email }
+          : null;
+        const { changed } = await updateMaterialMeta(obraId, materialKey, patch, editor);
+        // Devolver los valores normalizados (trim) y los campos efectivamente
+        // modificados para que la vista refresque sin re-leer.
+        const normalized = {
+          familia: (patch.familia || '').trim(),
+          subfamilia: (patch.subfamilia || '').trim(),
+          marca: (patch.marca || '').trim(),
+          proveedor: (patch.proveedor || '').trim()
+        };
+        const changedFields = {};
+        for (const f of ['familia', 'subfamilia', 'marca', 'proveedor']) {
+          if (normalized[f] !== (material[f] || '').trim()) changedFields[f] = true;
+        }
+        if (changed > 0) toast('Catálogo actualizado', 'ok');
+        else toast('Sin cambios');
+        if (onSaved) onSaved(normalized, changedFields);
+        return true;
+      } catch (err) {
+        toast('Error: ' + err.message, 'danger');
+        return false;
+      }
+    }
+  });
 }

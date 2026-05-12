@@ -80,32 +80,94 @@ export async function loadCatalogoMateriales(obraId) {
   return { meta, items: items || {} };
 }
 
-// Escribe el catálogo de materiales preservando los items que NO son OPUS
-// (ad_hoc_materiales, ad_hoc_compras, o ad_hoc legacy) — creados manualmente
-// desde alguna de las apps, no provenientes del XLS de OPUS. Si OPUS termina
-// exportando la misma clave/desc/unidad, el materialKey colisiona y el
-// ad_hoc queda absorbido por el de OPUS — comportamiento deseado.
+// Escribe el catálogo de materiales preservando dos cosas:
+//   1) Los items que NO son OPUS (ad_hoc_materiales, ad_hoc_compras, ad_hoc
+//      legacy) — creados manualmente desde alguna de las apps. Si OPUS termina
+//      exportando la misma clave/desc/unidad, el materialKey colisiona y el
+//      ad_hoc queda absorbido por el de OPUS — comportamiento deseado.
+//   2) Para items OPUS que coinciden por materialKey con el re-import:
+//      cualquier campo marcado en `manualOverrides` del item existente
+//      (familia, subfamilia, marca, proveedor) se mantiene, en lugar de
+//      sobrescribirse con el valor del XLS. Esto protege ediciones hechas
+//      desde la app antes de que el round-trip a OPUS se complete. Si OPUS
+//      ya tiene el mismo valor que el override, el efecto es cero.
+const META_OVERRIDABLE_FIELDS = ['familia', 'subfamilia', 'marca', 'proveedor'];
+
 export async function saveCatalogoMateriales(obraId, meta, items) {
   const existing = await rread(`obras/${obraId}/catalogo/items`) || {};
   const merged = { ...items };
   let preservados = 0;
+  let overridesRespetados = 0;
   const ORIGEN_NO_OPUS = new Set(['ad_hoc', 'ad_hoc_materiales', 'ad_hoc_compras']);
+
   for (const [k, v] of Object.entries(existing)) {
     if (v?.origen && ORIGEN_NO_OPUS.has(v.origen) && !merged[k]) {
       merged[k] = v;
       preservados++;
+      continue;
+    }
+    // Re-import: si el material persiste y el existente tenía overrides
+    // manuales, los mantenemos sobre el valor traído por el XLS.
+    if (merged[k] && v?.manualOverrides) {
+      const carry = {};
+      let any = false;
+      for (const f of META_OVERRIDABLE_FIELDS) {
+        if (v.manualOverrides[f]) { carry[f] = v[f] ?? ''; any = true; }
+      }
+      if (any) {
+        merged[k] = { ...merged[k], ...carry, manualOverrides: { ...v.manualOverrides } };
+        if (v.editedAt) merged[k].editedAt = v.editedAt;
+        if (v.editedBy) merged[k].editedBy = v.editedBy;
+        overridesRespetados++;
+      }
     }
   }
   const finalMeta = { ...meta };
   if (preservados > 0) finalMeta.adHocPreservados = preservados;
+  if (overridesRespetados > 0) finalMeta.metaOverridesRespetados = overridesRespetados;
   await set(_ref(`obras/${obraId}/catalogo`), { meta: finalMeta, items: merged });
-  return { preservados };
+  return { preservados, overridesRespetados };
 }
 
 // Crea un material ad-hoc en la obra (no proveniente de OPUS). Usado cuando el
 // almacenista necesita registrar algo que el catálogo no contempla.
 export async function createMaterialAdHoc(obraId, materialKey, data) {
   await rset(`obras/${obraId}/catalogo/items/${materialKey}`, data);
+}
+
+// Edita campos de catálogo del material (familia, subfamilia, marca, proveedor)
+// desde la UI. Marca cada campo en `manualOverrides` para que el re-import del
+// XLS de OPUS NO sobreescriba la edición hasta que OPUS la tenga también
+// (después de subirle el XLS exportado desde esta app). Como `compras` lee del
+// mismo path `/shared/materiales/{obraId}/catalogo/items/{materialKey}`, ve el
+// cambio automáticamente — no hay sync extra.
+//
+// `patch` es { familia?, subfamilia?, marca?, proveedor? } con strings ('' OK
+// para limpiar). Cualquier campo no presente en patch queda intacto.
+export async function updateMaterialMeta(obraId, materialKey, patch, editor) {
+  const path = `obras/${obraId}/catalogo/items/${materialKey}`;
+  const current = await rread(path);
+  if (!current) throw new Error('Material no encontrado');
+  const overrides = { ...(current.manualOverrides || {}) };
+  const update = {};
+  let changedCount = 0;
+  for (const f of META_OVERRIDABLE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(patch, f)) continue;
+    const val = (patch[f] || '').toString().trim();
+    const prev = (current[f] || '').toString().trim();
+    update[f] = val;
+    if (val !== prev) {
+      overrides[f] = true;   // flag persiste aunque después se borre el valor:
+                             // el "ya lo edité" es la señal, no el valor actual.
+      changedCount++;
+    }
+  }
+  if (changedCount === 0) return { changed: 0 };
+  update.manualOverrides = overrides;
+  update.editedAt = Date.now();
+  if (editor) update.editedBy = editor;
+  await rupdate(path, update);
+  return { changed: changedCount };
 }
 
 // === Salidas ===

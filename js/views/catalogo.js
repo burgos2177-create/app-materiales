@@ -8,6 +8,7 @@ import {
 import { buildConceptosResueltos } from '../services/opus-materiales-exporter.js';
 import { isAdHoc, isAdHocCompras, origenLabel } from '../services/origen.js';
 import { money, num, num0 } from '../util/format.js';
+import { editMaterialMetaDialog } from './_dialogs.js';
 
 export async function renderCatalogo({ params }) {
   const obraId = params.id;
@@ -36,13 +37,38 @@ export async function renderCatalogo({ params }) {
   // Mismo merge que usa el export y el dashboard.
   const resueltosMap = buildConceptosResueltos(items, { requisiciones, recepciones, salidas });
 
+  const canEdit = state.user?.role !== 'ingeniero';
+  const openEdit = (id) => {
+    const m = items[id];
+    if (!m) return;
+    editMaterialMetaDialog({
+      obraId, materialKey: id, material: m,
+      familiasExistentes: Object.values(items).map(x => x.familia),
+      marcasExistentes: Object.values(items).map(x => x.marca),
+      onSaved: (patch, changedFields) => {
+        // Mutamos el item en memoria para reflejar en la lista de filtros y la fila.
+        // Solo marcamos overrides en los campos que cambiaron (espejo de la lógica del DB).
+        const overrides = { ...(m.manualOverrides || {}) };
+        for (const f of Object.keys(changedFields || {})) overrides[f] = true;
+        items[id] = { ...m, ...patch, manualOverrides: overrides };
+        refreshFamiliasDropdown();
+        refresh();
+      }
+    });
+  };
+
   // Filtros
   const search = h('input', { placeholder: 'Buscar por clave, descripción, marca…', style: { flex: '1', minWidth: '260px' } });
-  const familias = [...new Set(Object.values(items).map(m => m.familia).filter(Boolean))].sort();
-  const familiaSel = h('select', {}, [
-    h('option', { value: '' }, 'Todas las familias'),
-    ...familias.map(f => h('option', { value: f }, f))
-  ]);
+  const familiaSel = h('select', {}, [h('option', { value: '' }, 'Todas las familias')]);
+  function refreshFamiliasDropdown() {
+    const prev = familiaSel.value;
+    const familias = [...new Set(Object.values(items).map(m => m.familia).filter(Boolean))].sort();
+    familiaSel.innerHTML = '';
+    familiaSel.appendChild(h('option', { value: '' }, 'Todas las familias'));
+    for (const f of familias) familiaSel.appendChild(h('option', { value: f }, f));
+    if (familias.includes(prev)) familiaSel.value = prev;
+  }
+  refreshFamiliasDropdown();
   const soloSinResolver = h('input', { type: 'checkbox' });
   const soloAgregados = h('input', { type: 'checkbox' });
   const soloAdHoc = h('input', { type: 'checkbox' });
@@ -68,7 +94,7 @@ export async function renderCatalogo({ params }) {
       if (sinResolver && r.all.size > 0) continue;
       if (conAgregados && r.agregados.size === 0) continue;
       if (adHoc && !isAdHoc(m.origen)) continue;
-      tbody.appendChild(materialRow(id, m, conceptos, r));
+      tbody.appendChild(materialRow(id, m, conceptos, r, { canEdit, onEditMeta: openEdit }));
       visible++;
     }
     const sumario = `${num0(visible)} / ${num0(ids.length)} materiales`;
@@ -126,7 +152,8 @@ function conceptoLabel(ck, conceptos) {
   return c.clave || ck.slice(0, 12);
 }
 
-function materialRow(id, m, conceptos, resueltos) {
+function materialRow(id, m, conceptos, resueltos, opts = {}) {
+  const { canEdit = false, onEditMeta = null } = opts;
   const directos = [...resueltos.directos];
   const agregados = [...resueltos.agregados];
   const total = directos.length + agregados.length;
@@ -159,6 +186,31 @@ function materialRow(id, m, conceptos, resueltos) {
 
   const famMarca = [m.familia, m.marca].filter(Boolean).join(' · ');
   const adHocFlag = isAdHoc(m.origen);
+  const edited = m.manualOverrides && Object.values(m.manualOverrides).some(Boolean);
+
+  // Celda Familia / Marca: clickable cuando hay permiso. Si está vacía,
+  // mostramos un placeholder "+ asignar" en lugar de un espacio en blanco.
+  let famMarcaCell;
+  if (canEdit && onEditMeta) {
+    const inner = famMarca
+      ? h('span', {}, [
+          famMarca,
+          edited ? h('span', {
+            class: 'tag',
+            style: { marginLeft: '6px', fontSize: '10px' },
+            title: 'Editado en la app. Se preserva contra re-imports de OPUS hasta que el XLS exportado se cargue en OPUS.'
+          }, '✎') : null
+        ])
+      : h('span', { style: { color: 'var(--accent)', fontStyle: 'italic' } }, '+ asignar familia / marca');
+    famMarcaCell = h('td', {
+      class: 'muted',
+      style: { fontSize: '11px', cursor: 'pointer', userSelect: 'none' },
+      title: 'Editar familia, subfamilia, marca y proveedor',
+      onClick: () => onEditMeta(id)
+    }, inner);
+  } else {
+    famMarcaCell = h('td', { class: 'muted', style: { fontSize: '11px' } }, famMarca);
+  }
 
   return h('tr', {}, [
     h('td', { class: 'mono', style: { fontSize: '11px' } }, [
@@ -177,7 +229,7 @@ function materialRow(id, m, conceptos, resueltos) {
     h('td', { class: 'num' }, money(m.costoUnitario)),
     h('td', { class: 'num' }, money(m.importe)),
     h('td', {}, conceptosCell),
-    h('td', { class: 'muted', style: { fontSize: '11px' } }, famMarca)
+    famMarcaCell
   ]);
 }
 
