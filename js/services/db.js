@@ -170,6 +170,39 @@ export async function updateMaterialMeta(obraId, materialKey, patch, editor) {
   return { changed: changedCount };
 }
 
+// Actualiza meta (familia/subfamilia/marca/proveedor) en bulk para múltiples
+// materiales en una sola escritura multi-path a RTDB. Cada campo presente en
+// el patch se flagea en `manualOverrides`, mismo criterio que updateMaterialMeta.
+//
+// updatesByKey: { [materialKey]: { familia?, subfamilia?, marca?, proveedor? } }
+// editor: { uid, displayName } opcional.
+//
+// Devuelve { affected: number } con la cuenta de materiales tocados.
+export async function bulkUpdateMaterialMeta(obraId, updatesByKey, editor) {
+  const keys = Object.keys(updatesByKey || {});
+  if (keys.length === 0) return { affected: 0 };
+  const patches = {};
+  const now = Date.now();
+  for (const matKey of keys) {
+    const fieldPatch = updatesByKey[matKey] || {};
+    let touchedAny = false;
+    for (const f of META_OVERRIDABLE_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(fieldPatch, f)) continue;
+      const val = (fieldPatch[f] || '').toString().trim();
+      patches[`items/${matKey}/${f}`] = val;
+      patches[`items/${matKey}/manualOverrides/${f}`] = true;
+      touchedAny = true;
+    }
+    if (touchedAny) {
+      patches[`items/${matKey}/editedAt`] = now;
+      if (editor) patches[`items/${matKey}/editedBy`] = editor;
+    }
+  }
+  if (Object.keys(patches).length === 0) return { affected: 0 };
+  await update(_ref(`obras/${obraId}/catalogo`), patches);
+  return { affected: keys.length };
+}
+
 // === Salidas ===
 //
 // Modelo (nuevo, multi-allocation):

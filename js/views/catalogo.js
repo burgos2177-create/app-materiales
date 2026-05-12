@@ -8,7 +8,7 @@ import {
 import { buildConceptosResueltos } from '../services/opus-materiales-exporter.js';
 import { isAdHoc, isAdHocCompras, origenLabel } from '../services/origen.js';
 import { money, num, num0 } from '../util/format.js';
-import { editMaterialMetaDialog } from './_dialogs.js';
+import { editMaterialMetaDialog, manageFamiliasDialog } from './_dialogs.js';
 
 export async function renderCatalogo({ params }) {
   const obraId = params.id;
@@ -138,8 +138,23 @@ export async function renderCatalogo({ params }) {
     tbody
   ]);
 
+  const manageBtn = canEdit
+    ? h('button', {
+        class: 'btn sm',
+        title: 'Administrar familias y subfamilias',
+        onClick: () => manageFamiliasDialog({
+          obraId, items,
+          onChange: () => { refreshFamiliasDropdown(); refresh(); }
+        })
+      }, '🏷 Administrar familias')
+    : null;
+
   renderShell(crumbs(obraId, meta?.nombre), h('div', {}, [
-    h('h1', {}, 'Catálogo de materiales'),
+    h('div', { class: 'row', style: { alignItems: 'center', gap: '12px', marginBottom: '8px' } }, [
+      h('h1', { style: { margin: 0 } }, 'Catálogo de materiales'),
+      h('div', { style: { flex: 1 } }),
+      manageBtn
+    ]),
     filtersBar,
     h('div', { class: 'card', style: { padding: '0', overflow: 'auto', maxHeight: '70vh' } }, [table])
   ]));

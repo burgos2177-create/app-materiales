@@ -10,7 +10,7 @@
 
 import { h, modal, toast } from '../util/dom.js';
 import { state } from '../state/store.js';
-import { createMaterialAdHoc, updateMaterialMeta } from '../services/db.js';
+import { createMaterialAdHoc, updateMaterialMeta, bulkUpdateMaterialMeta } from '../services/db.js';
 import { computeMaterialKey } from '../services/material-keys.js';
 import { isAdHoc, isAdHocCompras, origenLabel } from '../services/origen.js';
 
@@ -1040,4 +1040,356 @@ export function editMaterialMetaDialog({
       }
     }
   });
+}
+
+// === manageFamiliasDialog ===
+//
+// Modal grande para administrar familias y subfamilias del catálogo de la obra:
+//   1) Tabla de grupos existentes (familia, subfamilia) con count y acciones
+//      Renombrar / Vaciar (aplica a todos los materiales del grupo).
+//   2) Asignación masiva por filtros: buscar por texto, filtrar por familia
+//      actual o "sin familia", y aplicar nueva familia/subfamilia al match.
+//
+// Todo se persiste vía bulkUpdateMaterialMeta — una sola escritura multi-path,
+// con manualOverrides flageado para preservar contra re-imports de OPUS. Como
+// compras lee del mismo path, ve los cambios sin sync extra.
+//
+// opts:
+//   obraId         — para los writes.
+//   items          — { materialKey: material } actual en memoria, mutable: se
+//                    actualiza in-place tras cada operación para reflejar.
+//   onChange()     — callback tras cualquier cambio aplicado (refresca la vista
+//                    del catálogo). Idempotente.
+export function manageFamiliasDialog({ obraId, items, onChange }) {
+  // === Estado y helpers ===
+  const SIN_FAMILIA = '__sin_familia__';
+  const editor = state.user
+    ? { uid: state.user.uid, displayName: state.user.displayName || state.user.email }
+    : null;
+
+  function familiasUnicas() {
+    return [...new Set(Object.values(items).map(m => (m.familia || '').trim()).filter(Boolean))].sort();
+  }
+  function gruposFamSub() {
+    // Map "familia subfamilia" → { familia, subfamilia, count, claves[] }
+    const map = new Map();
+    for (const m of Object.values(items)) {
+      const fam = (m.familia || '').trim();
+      const sub = (m.subfamilia || '').trim();
+      const key = fam + ' ' + sub;
+      if (!map.has(key)) map.set(key, { familia: fam, subfamilia: sub, count: 0, claves: [] });
+      const g = map.get(key);
+      g.count++;
+      if (g.claves.length < 4) g.claves.push(m.clave);
+    }
+    return [...map.values()].sort((a, b) => {
+      // Sin familia al final; luego alfabético por (familia, subfamilia)
+      if (!a.familia && b.familia) return 1;
+      if (a.familia && !b.familia) return -1;
+      const fc = a.familia.localeCompare(b.familia, 'es');
+      if (fc !== 0) return fc;
+      return a.subfamilia.localeCompare(b.subfamilia, 'es');
+    });
+  }
+
+  // === Sección 1: Grupos existentes ===
+  const gruposTbody = h('tbody', {});
+  function renderGrupos() {
+    gruposTbody.innerHTML = '';
+    const grupos = gruposFamSub();
+    if (grupos.length === 0) {
+      gruposTbody.appendChild(h('tr', {}, h('td', { colspan: 4, class: 'muted', style: { textAlign: 'center', padding: '12px' } }, 'Sin materiales.')));
+      return;
+    }
+    for (const g of grupos) {
+      const noFam = !g.familia;
+      const noSub = !g.subfamilia;
+      gruposTbody.appendChild(h('tr', {}, [
+        h('td', {}, noFam ? h('span', { class: 'muted', style: { fontStyle: 'italic' } }, '(sin familia)') : g.familia),
+        h('td', {}, noSub ? h('span', { class: 'muted' }, '—') : g.subfamilia),
+        h('td', { class: 'num', style: { fontSize: '12px' } }, [
+          String(g.count),
+          h('div', { class: 'muted', style: { fontSize: '10px', fontFamily: 'var(--mono)' } }, g.claves.join(', ') + (g.count > g.claves.length ? '…' : ''))
+        ]),
+        h('td', {}, h('div', { class: 'row', style: { gap: '4px', justifyContent: 'flex-end' } }, [
+          h('button', {
+            class: 'btn ghost sm', style: { fontSize: '11px' },
+            title: 'Renombrar familia / subfamilia de los ' + g.count + ' materiales',
+            onClick: () => renombrarGrupo(g)
+          }, '✎ Renombrar'),
+          !noFam || !noSub
+            ? h('button', {
+                class: 'btn ghost sm', style: { fontSize: '11px', color: 'var(--danger)' },
+                title: 'Vaciar familia y subfamilia (deja los materiales sin clasificar)',
+                onClick: () => vaciarGrupo(g)
+              }, '🗑 Vaciar')
+            : null
+        ]))
+      ]));
+    }
+  }
+
+  async function renombrarGrupo(g) {
+    const newFam = h('input', { value: g.familia, placeholder: 'Familia', autofocus: true });
+    const newSub = h('input', { value: g.subfamilia, placeholder: 'Subfamilia (opcional)' });
+    await modal({
+      title: `Renombrar grupo (${g.count} materiales)`,
+      body: h('div', {}, [
+        h('div', { class: 'muted', style: { fontSize: '12px', marginBottom: '8px' } },
+          `Materiales actuales: ${g.familia || '(sin familia)'}${g.subfamilia ? ' · ' + g.subfamilia : ''}.`),
+        h('div', { class: 'field' }, [h('label', {}, 'Nueva familia'), newFam]),
+        h('div', { class: 'field' }, [h('label', {}, 'Nueva subfamilia'), newSub]),
+        h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '6px' } },
+          'Se aplica a TODOS los materiales del grupo. Cada campo se marca como manualOverride.')
+      ]),
+      confirmLabel: 'Renombrar', size: 'lg',
+      onConfirm: async () => {
+        const updatesByKey = {};
+        for (const [k, m] of Object.entries(items)) {
+          if ((m.familia || '').trim() === g.familia && (m.subfamilia || '').trim() === g.subfamilia) {
+            updatesByKey[k] = { familia: newFam.value, subfamilia: newSub.value };
+          }
+        }
+        try {
+          const { affected } = await bulkUpdateMaterialMeta(obraId, updatesByKey, editor);
+          // Mutar items en memoria
+          for (const k of Object.keys(updatesByKey)) {
+            items[k] = {
+              ...items[k],
+              familia: newFam.value.trim(),
+              subfamilia: newSub.value.trim(),
+              manualOverrides: { ...(items[k].manualOverrides || {}), familia: true, subfamilia: true }
+            };
+          }
+          toast(`Renombrados: ${affected} materiales`, 'ok');
+          renderGrupos(); renderBulk(); onChange && onChange();
+          return true;
+        } catch (err) { toast('Error: ' + err.message, 'danger'); return false; }
+      }
+    });
+  }
+
+  async function vaciarGrupo(g) {
+    const ok = await modal({
+      title: 'Vaciar familia y subfamilia',
+      body: h('div', {}, [
+        h('p', {}, `Vas a vaciar la familia y subfamilia de ${g.count} materiales del grupo "${g.familia || '(sin familia)'}${g.subfamilia ? ' · ' + g.subfamilia : ''}".`),
+        h('p', { class: 'muted', style: { fontSize: '12px' } }, 'Los materiales quedan sin clasificar pero con manualOverride marcado, para que el re-import de OPUS no los re-llene.')
+      ]),
+      confirmLabel: 'Vaciar', danger: true
+    });
+    if (!ok) return;
+    const updatesByKey = {};
+    for (const [k, m] of Object.entries(items)) {
+      if ((m.familia || '').trim() === g.familia && (m.subfamilia || '').trim() === g.subfamilia) {
+        updatesByKey[k] = { familia: '', subfamilia: '' };
+      }
+    }
+    try {
+      const { affected } = await bulkUpdateMaterialMeta(obraId, updatesByKey, editor);
+      for (const k of Object.keys(updatesByKey)) {
+        items[k] = {
+          ...items[k], familia: '', subfamilia: '',
+          manualOverrides: { ...(items[k].manualOverrides || {}), familia: true, subfamilia: true }
+        };
+      }
+      toast(`Vaciados: ${affected} materiales`, 'ok');
+      renderGrupos(); renderBulk(); onChange && onChange();
+    } catch (err) { toast('Error: ' + err.message, 'danger'); }
+  }
+
+  // === Sección 2: Asignación masiva por filtros ===
+  const bulkSearch = h('input', { placeholder: 'Buscar por clave, descripción o marca…' });
+  const bulkFamSel = h('select', {});
+  const bulkSoloSin = h('input', { type: 'checkbox' });
+  const bulkCount = h('div', { class: 'muted', style: { fontSize: '12px' } }, '');
+  const bulkPreview = h('div', { class: 'muted', style: { fontSize: '11px', fontFamily: 'var(--mono)' } }, '');
+  const newFamDLId = 'dl-newfam-' + Math.random().toString(36).slice(2, 8);
+  const newSubDLId = 'dl-newsub-' + Math.random().toString(36).slice(2, 8);
+  const bulkNewFam = h('input', { placeholder: 'Nueva familia (vacío = no tocar)' });
+  const bulkNewSub = h('input', { placeholder: 'Nueva subfamilia (vacío = no tocar)' });
+  bulkNewFam.setAttribute('list', newFamDLId);
+  bulkNewSub.setAttribute('list', newSubDLId);
+  const bulkClearFam = h('input', { type: 'checkbox' });
+  const bulkClearSub = h('input', { type: 'checkbox' });
+  const aplicarBtn = h('button', { class: 'btn primary' }, 'Aplicar');
+
+  function repoblarFamSelect() {
+    const prev = bulkFamSel.value;
+    bulkFamSel.innerHTML = '';
+    bulkFamSel.appendChild(h('option', { value: '' }, 'Cualquier familia'));
+    bulkFamSel.appendChild(h('option', { value: SIN_FAMILIA }, '(sin familia)'));
+    for (const f of familiasUnicas()) bulkFamSel.appendChild(h('option', { value: f }, f));
+    if ([...bulkFamSel.options].some(o => o.value === prev)) bulkFamSel.value = prev;
+  }
+  function repoblarDatalists() {
+    const fams = familiasUnicas();
+    const subs = [...new Set(Object.values(items).map(m => (m.subfamilia || '').trim()).filter(Boolean))].sort();
+    const famDL = document.getElementById(newFamDLId);
+    const subDL = document.getElementById(newSubDLId);
+    if (famDL) { famDL.innerHTML = ''; for (const f of fams) famDL.appendChild(h('option', { value: f })); }
+    if (subDL) { subDL.innerHTML = ''; for (const s of subs) subDL.appendChild(h('option', { value: s })); }
+  }
+
+  function matchSet() {
+    const q = bulkSearch.value.toLowerCase().trim();
+    const fam = bulkFamSel.value;
+    const soloSin = bulkSoloSin.checked;
+    const out = [];
+    for (const [k, m] of Object.entries(items)) {
+      const fActual = (m.familia || '').trim();
+      if (soloSin && fActual !== '') continue;
+      if (!soloSin && fam) {
+        if (fam === SIN_FAMILIA) { if (fActual !== '') continue; }
+        else if (fActual !== fam) continue;
+      }
+      if (q) {
+        const blob = `${m.clave} ${m.descripcion} ${m.marca || ''}`.toLowerCase();
+        if (!blob.includes(q)) continue;
+      }
+      out.push([k, m]);
+    }
+    return out;
+  }
+  function renderBulk() {
+    repoblarFamSelect();
+    repoblarDatalists();
+    const matches = matchSet();
+    bulkCount.textContent = `${matches.length} materiales coinciden con los filtros`;
+    if (matches.length === 0) bulkPreview.textContent = '';
+    else {
+      const sample = matches.slice(0, 6).map(([, m]) => m.clave).join(', ');
+      bulkPreview.textContent = matches.length > 6 ? `${sample}, … (+${matches.length - 6} más)` : sample;
+    }
+    aplicarBtn.textContent = `Aplicar a los ${matches.length} coincidentes`;
+    aplicarBtn.disabled = matches.length === 0;
+  }
+  bulkSearch.addEventListener('input', renderBulk);
+  bulkFamSel.addEventListener('change', renderBulk);
+  bulkSoloSin.addEventListener('change', renderBulk);
+
+  aplicarBtn.addEventListener('click', async () => {
+    const matches = matchSet();
+    if (matches.length === 0) return;
+    const newFam = bulkNewFam.value.trim();
+    const newSub = bulkNewSub.value.trim();
+    const clearFam = bulkClearFam.checked;
+    const clearSub = bulkClearSub.checked;
+    const patch = {};
+    if (newFam || clearFam) patch.familia = clearFam ? '' : newFam;
+    if (newSub || clearSub) patch.subfamilia = clearSub ? '' : newSub;
+    if (Object.keys(patch).length === 0) {
+      toast('Define al menos un valor (familia o subfamilia) o marca "vaciar"', 'danger');
+      return;
+    }
+    const resumenPatch = [];
+    if ('familia' in patch) resumenPatch.push(`familia = "${patch.familia || '(vacía)'}"`);
+    if ('subfamilia' in patch) resumenPatch.push(`subfamilia = "${patch.subfamilia || '(vacía)'}"`);
+    const ok = await modal({
+      title: 'Confirmar asignación masiva',
+      body: h('div', {}, [
+        h('p', {}, `Vas a aplicar ${resumenPatch.join(' y ')} a ${matches.length} materiales.`),
+        h('p', { class: 'muted', style: { fontSize: '11px' } }, `Primeras claves: ${matches.slice(0, 6).map(([, m]) => m.clave).join(', ')}${matches.length > 6 ? `, … (+${matches.length - 6} más)` : ''}.`)
+      ]),
+      confirmLabel: 'Aplicar'
+    });
+    if (!ok) return;
+    const updatesByKey = {};
+    for (const [k] of matches) updatesByKey[k] = patch;
+    try {
+      const { affected } = await bulkUpdateMaterialMeta(obraId, updatesByKey, editor);
+      for (const [k] of matches) {
+        const o = { ...(items[k].manualOverrides || {}) };
+        if ('familia' in patch) o.familia = true;
+        if ('subfamilia' in patch) o.subfamilia = true;
+        items[k] = { ...items[k], ...patch, manualOverrides: o };
+      }
+      toast(`Aplicado a ${affected} materiales`, 'ok');
+      // Limpiar inputs y refrescar UI
+      bulkNewFam.value = ''; bulkNewSub.value = '';
+      bulkClearFam.checked = false; bulkClearSub.checked = false;
+      renderGrupos(); renderBulk(); onChange && onChange();
+    } catch (err) { toast('Error: ' + err.message, 'danger'); }
+  });
+
+  // === Modal body ===
+  repoblarFamSelect();
+
+  const tablaGrupos = h('table', { class: 'tbl' }, [
+    h('thead', {}, h('tr', {}, [
+      h('th', {}, 'Familia'),
+      h('th', {}, 'Subfamilia'),
+      h('th', { class: 'num' }, 'Materiales'),
+      h('th', {}, '')
+    ])),
+    gruposTbody
+  ]);
+
+  const body = h('div', {}, [
+    h('h3', { style: { marginTop: 0 } }, 'Familias existentes'),
+    h('div', { class: 'muted', style: { fontSize: '12px', marginBottom: '8px' } },
+      'Cada fila agrupa materiales que comparten familia + subfamilia. Renombrar afecta a todos los del grupo; vaciar los deja sin clasificar.'),
+    h('div', { class: 'card', style: { padding: '0', maxHeight: '260px', overflow: 'auto' } }, [tablaGrupos]),
+
+    h('h3', { style: { marginTop: '18px' } }, 'Asignación masiva por filtros'),
+    h('div', { class: 'muted', style: { fontSize: '12px', marginBottom: '8px' } },
+      'Filtra los materiales y asigna familia y/o subfamilia a todos los que coincidan.'),
+    h('div', { class: 'card' }, [
+      h('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } }, [
+        h('div', { style: { flex: '2', minWidth: '220px' } }, [
+          h('label', { class: 'muted', style: { fontSize: '11px' } }, 'Buscar'),
+          bulkSearch
+        ]),
+        h('div', { style: { flex: '1', minWidth: '180px' } }, [
+          h('label', { class: 'muted', style: { fontSize: '11px' } }, 'Familia actual'),
+          bulkFamSel
+        ]),
+        h('label', { class: 'row', style: { gap: '6px', alignItems: 'center', cursor: 'pointer' } }, [
+          bulkSoloSin, h('span', { style: { fontSize: '12px' } }, 'Solo sin familia')
+        ])
+      ]),
+      h('div', { style: { marginTop: '6px' } }, [bulkCount, bulkPreview]),
+      h('hr', { style: { border: 'none', borderTop: '1px solid var(--border)', margin: '10px 0' } }),
+      h('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap', alignItems: 'flex-end' } }, [
+        h('div', { style: { flex: '1', minWidth: '200px' } }, [
+          h('label', { class: 'muted', style: { fontSize: '11px' } }, 'Asignar familia'),
+          bulkNewFam,
+          h('label', { class: 'row', style: { gap: '6px', alignItems: 'center', cursor: 'pointer', marginTop: '4px', fontSize: '11px' } }, [
+            bulkClearFam, h('span', { class: 'muted' }, 'Vaciar familia (ignorar campo)')
+          ])
+        ]),
+        h('div', { style: { flex: '1', minWidth: '200px' } }, [
+          h('label', { class: 'muted', style: { fontSize: '11px' } }, 'Asignar subfamilia'),
+          bulkNewSub,
+          h('label', { class: 'row', style: { gap: '6px', alignItems: 'center', cursor: 'pointer', marginTop: '4px', fontSize: '11px' } }, [
+            bulkClearSub, h('span', { class: 'muted' }, 'Vaciar subfamilia (ignorar campo)')
+          ])
+        ]),
+        aplicarBtn
+      ]),
+      h('datalist', { id: newFamDLId }),
+      h('datalist', { id: newSubDLId })
+    ])
+  ]);
+
+  // Modal sin onConfirm: solo cierra. Las operaciones tienen sus propios botones.
+  const root = document.getElementById('modal-root');
+  let backdrop;
+  const close = () => { if (backdrop) backdrop.remove(); };
+  const card = h('div', { class: 'modal lg' }, [
+    h('h2', {}, 'Administrar familias y subfamilias'),
+    body,
+    h('div', { class: 'actions' }, [
+      h('button', { class: 'btn', onClick: () => close() }, 'Cerrar')
+    ])
+  ]);
+  backdrop = h('div', {
+    class: 'modal-backdrop',
+    onClick: (e) => { if (e.target === e.currentTarget) close(); }
+  }, card);
+  root.appendChild(backdrop);
+
+  // Initial render after attachment so datalists exist in DOM
+  renderGrupos();
+  renderBulk();
 }
