@@ -962,10 +962,15 @@ export function editMaterialMetaDialog({
   const familiaDLId = 'dl-fam-' + Math.random().toString(36).slice(2, 8);
   const marcaDLId = 'dl-mar-' + Math.random().toString(36).slice(2, 8);
 
-  const familia = h('input', { value: material.familia || '', placeholder: 'Familia (p.ej. ELECTRICIDAD)', list: familiaDLId, autofocus: true });
+  // OJO: `list` en HTMLInputElement es getter-only; hay que asignarlo como
+  // atributo, no como propiedad. Lo seteamos después con setAttribute para
+  // evitar que el helper h() lo intente como property.
+  const familia = h('input', { value: material.familia || '', placeholder: 'Familia (p.ej. ELECTRICIDAD)', autofocus: true });
   const subfamilia = h('input', { value: material.subfamilia || '', placeholder: 'Subfamilia (opcional)' });
-  const marca = h('input', { value: material.marca || '', placeholder: 'Marca (opcional)', list: marcaDLId });
+  const marca = h('input', { value: material.marca || '', placeholder: 'Marca (opcional)' });
   const proveedor = h('input', { value: material.proveedor || '', placeholder: 'Proveedor (opcional)' });
+  familia.setAttribute('list', familiaDLId);
+  marca.setAttribute('list', marcaDLId);
 
   const famDL = h('datalist', { id: familiaDLId },
     [...new Set(familiasExistentes.filter(Boolean))].sort().map(v => h('option', { value: v })));

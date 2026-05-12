@@ -7,7 +7,12 @@ export function h(tag, attrs = {}, children = []) {
     else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
     else if (k === 'html') el.innerHTML = v;
     else if (k === 'dataset' && typeof v === 'object') Object.assign(el.dataset, v);
-    else if (k in el && typeof el[k] !== 'function') el[k] = v;
+    else if (k in el && typeof el[k] !== 'function') {
+      // Algunos atributos HTML existen como property pero son getter-only
+      // (p.ej. `list` en HTMLInputElement). Si el set falla, caemos a
+      // setAttribute en lugar de tronar.
+      try { el[k] = v; } catch { el.setAttribute(k, v); }
+    }
     else el.setAttribute(k, v);
   }
   appendChildren(el, children);
