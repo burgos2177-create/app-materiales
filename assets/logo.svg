@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#222838"/>
+      <stop offset="0.55" stop-color="#161a21"/>
+      <stop offset="1" stop-color="#0d1015"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.55">
+      <stop offset="0" stop-color="#f5a04c" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#f5a04c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#ffe0b8"/>
+      <stop offset="1" stop-color="#ffc587"/>
+    </linearGradient>
+    <linearGradient id="left" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b9712d"/>
+      <stop offset="1" stop-color="#9a5a22"/>
+    </linearGradient>
+    <linearGradient id="right" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f5a657"/>
+      <stop offset="1" stop-color="#e08c3c"/>
+    </linearGradient>
+    <clipPath id="round">
+      <rect x="0" y="0" width="512" height="512" rx="112" ry="112"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#round)">
+    <rect x="0" y="0" width="512" height="512" fill="url(#bg)"/>
+    <rect x="0" y="0" width="512" height="512" fill="url(#glow)"/>
+
+    <!-- soft ground shadow -->
+    <ellipse cx="256" cy="406" rx="132" ry="26" fill="#000000" opacity="0.32"/>
+
+    <!-- isometric crate -->
+    <!-- right face -->
+    <polygon points="256,284 372,219 372,332 256,397" fill="url(#right)"/>
+    <!-- left face -->
+    <polygon points="256,284 140,219 140,332 256,397" fill="url(#left)"/>
+    <!-- top face -->
+    <polygon points="256,152 372,217 256,282 140,217" fill="url(#top)"/>
+
+    <!-- top seam -->
+    <polyline points="140,217 256,282 372,217" fill="none" stroke="#7a4a1c" stroke-opacity="0.35" stroke-width="3"/>
+    <line x1="256" y1="282" x2="256" y2="397" stroke="#7a4a1c" stroke-opacity="0.4" stroke-width="3"/>
+
+    <!-- crate banding (right) -->
+    <polyline points="256,335 372,270" fill="none" stroke="#7a4a1c" stroke-opacity="0.30" stroke-width="6"/>
+    <!-- crate banding (left) -->
+    <polyline points="256,335 140,270" fill="none" stroke="#000000" stroke-opacity="0.18" stroke-width="6"/>
+
+    <!-- check badge: recepción verificada -->
+    <circle cx="256" cy="226" r="34" fill="#0d1015" opacity="0.18"/>
+    <polyline points="240,227 252,239 274,213" fill="none" stroke="#5dd39e" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
