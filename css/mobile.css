@@ -1,0 +1,93 @@
+/* ============================================================================
+   mobile.css — Capa responsiva ADITIVA para pantallas chicas.
+
+   Regla de oro: este archivo SOLO contiene media queries. Por encima del
+   breakpoint no aplica NADA, así que el layout de escritorio queda intacto
+   (idéntico a antes de existir este archivo). No se tocó el HTML/JS de las
+   vistas ni el CSS de escritorio (main.css).
+
+   Estrategia:
+   - Grids de columnas fijas (.grid-2/.grid-3) se apilan; los grids auto-fit
+     (KPIs, saldos, adjuntos) ya colapsan solos y no se tocan.
+   - Las tablas anchas hacen scroll horizontal DENTRO de su tarjeta (.card),
+     conservando columnas legibles en vez de aplastarlas. Todas las tablas de
+     página son hijas directas de un .card, así que se resuelve por CSS puro.
+   - Topbar, modales, login y formularios se compactan para el dedo.
+   ============================================================================ */
+
+/* ==========================================================================
+   Teléfonos y tablets en vertical
+   ========================================================================== */
+@media (max-width: 820px) {
+
+  /* ---------- Contención de ancho (evita blowout horizontal) ----------
+     .app-layout es un grid sin columnas explícitas (columna implícita `auto`),
+     así que contenido ancho —una tabla con min-width— estiraría la columna más
+     allá del viewport y empujaría los KPIs y el userchip fuera de pantalla.
+     minmax(0,1fr) fija la columna al ancho disponible y min-width:0 deja que el
+     contenido ancho scrollee DENTRO de su card en vez de ensanchar la página. */
+  .app-layout { grid-template-columns: minmax(0, 1fr); }
+  .app-layout > .page, .app-layout > .topbar { min-width: 0; }
+
+  /* ---------- Layout general ---------- */
+  .page { padding: 14px 12px; }
+  .page h1 { font-size: 19px; margin-bottom: 12px; }
+  .page h2 { font-size: 15px; margin: 18px 0 10px; }
+  .card { padding: 14px; }
+
+  /* iOS hace zoom al enfocar inputs con font-size < 16px. Lo evitamos. */
+  input, select, textarea { font-size: 16px; }
+
+  /* ---------- Topbar ---------- */
+  .topbar { flex-wrap: wrap; gap: 6px 10px; padding: 8px 12px; }
+  .topbar .logo { font-size: 14px; }
+  .topbar .spacer { display: none; }                 /* sin spacer, empacamos */
+  .topbar .userchip { margin-left: auto; padding: 3px 8px; gap: 6px; font-size: 11px; }
+  /* Migas de pan a su propio renglón, ancho completo */
+  .topbar .crumbs { order: 10; flex-basis: 100%; font-size: 12px; margin-top: 2px; }
+
+  /* ---------- Grids de columnas fijas -> apilados ----------
+     (los grids auto-fit de los KPIs ya colapsan solos, no se tocan) */
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  .grid-4 { grid-template-columns: 1fr 1fr; }
+
+  /* ---------- Tablas anchas: scroll horizontal dentro de la tarjeta ----------
+     Toda tabla de página es hija directa de un .card. La tarjeta se vuelve el
+     contenedor de scroll y la tabla conserva un ancho mínimo legible. Se
+     limita a tablas hijas de .card para NO forzar overflow en tablas dentro
+     de modales (esas se ajustan al ancho del modal). */
+  .card:has(> .tbl) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .card:has(> .tbl) > .tbl { min-width: 600px; }
+  .card:has(> .cat-table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .card:has(> .cat-table) > .cat-table { min-width: 680px; }
+
+  /* ---------- Modales: casi pantalla completa, acciones táctiles ---------- */
+  .modal-backdrop { padding: 10px; }
+  .modal, .modal.lg, .modal.xl, .modal.full {
+    width: 100%; max-width: 96vw; padding: 16px; border-radius: 12px; max-height: 90vh;
+  }
+  .modal h2 { font-size: 16px; }
+  .modal .actions { flex-direction: column-reverse; gap: 8px; }
+  .modal .actions .btn { width: 100%; padding: 11px; }
+
+  /* ---------- Login ---------- */
+  .login-card { width: 100%; max-width: 380px; padding: 22px; }
+
+  /* ---------- Toasts a lo ancho para que no queden cortados ---------- */
+  .toast-root { left: 12px; right: 12px; bottom: 12px; }
+  .toast { width: 100%; }
+
+  /* ---------- Botones más altos para el dedo (sin tocar los .sm de tablas) ---------- */
+  .btn:not(.sm) { padding: 10px 14px; }
+}
+
+/* ==========================================================================
+   Teléfonos angostos
+   ========================================================================== */
+@media (max-width: 480px) {
+  .page { padding: 12px 10px; }
+  /* Oculta el nombre largo del usuario; deja rol + Salir */
+  .topbar .userchip > span:first-child { display: none; }
+  /* KPIs / grid-4 a una sola columna */
+  .grid-4 { grid-template-columns: 1fr; }
+}
