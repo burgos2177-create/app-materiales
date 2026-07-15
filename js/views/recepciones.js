@@ -522,17 +522,35 @@ function buzonGastoBadge(estado) {
   return h('span', { class: 'tag muted' }, estado || '—');
 }
 
+function formaPagoLabel(fp) {
+  return ({
+    credito: '💳 Crédito (por pagar)',
+    efectivo: '💵 Efectivo (ya pagado)',
+    transferencia: '🏦 Transferencia (ya pagada)',
+    caja_chica: '🧾 Caja chica'
+  })[fp] || fp || '—';
+}
+
 function renderContadorStatus(buzonItem) {
   const ts = buzonItem.actualizadoAt
     ? `actualizado ${new Date(buzonItem.actualizadoAt).toLocaleString('es-MX')}`
     : (buzonItem.creadoAt ? `enviado ${new Date(buzonItem.creadoAt).toLocaleString('es-MX')}` : '');
+  const iva = Number(buzonItem.iva) || 0;
+  const totalConIva = Number(buzonItem.total ?? buzonItem.monto) || 0;
+  const subtotal = Number(buzonItem.subtotal ?? totalConIva) || 0;
   return h('div', {
     style: { padding: '10px 12px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: '6px' }
   }, [
     h('div', { class: 'muted', style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.4px' } }, 'Contador (bitácora)'),
     h('div', { class: 'row', style: { marginTop: '6px', gap: '10px' } }, [
       buzonGastoBadge(buzonItem.estado),
+      buzonItem.formaPago && h('span', { class: 'tag muted', style: { fontSize: '11px' } }, formaPagoLabel(buzonItem.formaPago)),
       ts && h('span', { class: 'muted', style: { fontSize: '12px' } }, ts)
+    ]),
+    h('div', { class: 'row', style: { marginTop: '6px', gap: '14px', fontSize: '12px' } }, [
+      h('span', { class: 'muted' }, ['Subtotal ', h('span', { class: 'mono' }, money(subtotal))]),
+      h('span', { class: 'muted' }, ['IVA ', h('span', { class: 'mono' }, money(iva))]),
+      h('span', {}, ['Total ', h('span', { class: 'mono', style: { fontWeight: 600 } }, money(totalConIva))])
     ]),
     buzonItem.estado === 'rechazado' && buzonItem.motivoRechazo && h('div', {
       class: 'tag danger', style: { marginTop: '8px', whiteSpace: 'normal', maxWidth: '100%' }
@@ -577,27 +595,67 @@ async function onEnviarContador(obraId, recId, rec, conceptos) {
 
   const desglose = buildDesgloseFromRecepcion(rec, conceptos);
   const folio = `E-${String(rec.numero).padStart(4, '0')}`;
+  const subtotal = total; // suma de items, sin IVA
+
+  // Forma de pago — le dice al contador si crea CxP (crédito) o si ya está pagado.
+  const formaSel = h('select', { value: rec.formaPago || 'credito' }, [
+    h('option', { value: 'credito' }, 'Crédito — se paga después (queda por pagar / CxP)'),
+    h('option', { value: 'efectivo' }, 'Efectivo — ya pagado'),
+    h('option', { value: 'transferencia' }, 'Transferencia — ya pagada'),
+    h('option', { value: 'caja_chica' }, 'Caja chica (fondo formal)')
+  ]);
+  formaSel.value = rec.formaPago || 'credito';
+
+  // Total de factura CON IVA (opcional). IVA = total − subtotal.
+  const facturaInput = h('input', {
+    type: 'number', step: '0.01', min: '0',
+    value: rec.facturaTotal ? String(rec.facturaTotal) : '',
+    placeholder: `Total con IVA (opcional) — subtotal ${money(subtotal)}`
+  });
+  const ivaVal = h('span', { class: 'mono', style: { fontSize: '12px' } }, money(0));
+  const totalVal = h('span', { class: 'mono' }, money(subtotal));
+  const warnEl = h('div', { class: 'tag warn', style: { display: 'none', marginTop: '6px', whiteSpace: 'normal' } },
+    'El total de factura es menor al subtotal; se ignora y se usa el subtotal.');
+  function recompute() {
+    const ft = Number(facturaInput.value) || 0;
+    const totalConIva = ft > subtotal ? ft : subtotal;
+    const iva = +(totalConIva - subtotal).toFixed(2);
+    ivaVal.textContent = money(iva);
+    totalVal.textContent = money(totalConIva);
+    warnEl.style.display = (ft > 0 && ft < subtotal) ? 'block' : 'none';
+  }
+  facturaInput.addEventListener('input', recompute);
+  recompute();
+
   await modal({
     title: 'Enviar recepción al contador',
     body: h('div', {}, [
-      h('p', {}, [
-        `Se enviará la recepción ${folio} por `,
-        h('b', {}, total.toLocaleString('es-MX', { style: 'currency', currency: 'MXN' })),
-        ' al buzón del contador (bitácora) para que apruebe y registre el gasto.'
+      h('p', {}, [`Se enviará la recepción ${folio} al buzón del contador (bitácora) para que apruebe y registre el gasto.`]),
+
+      h('div', { class: 'field', style: { marginBottom: '10px' } }, [h('label', {}, 'Forma de pago'), formaSel]),
+      h('div', { class: 'field', style: { marginBottom: '10px' } }, [
+        h('label', {}, 'Total de factura (con IVA)'), facturaInput, warnEl
       ]),
+
+      // Desglose por concepto (sin IVA — suma == subtotal)
       h('div', {
         style: { margin: '10px 0', padding: '10px 12px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '13px' }
       }, [
         h('div', { class: 'muted', style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '.4px', marginBottom: '6px' } },
-          `Desglose por concepto (${desglose.length})`),
+          `Desglose por concepto · sin IVA (${desglose.length})`),
         ...desglose.map(d => h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '10px' } }, [
           h('span', { class: 'mono', style: { fontSize: '12px' }, title: d.conceptoDescripcion || '' },
             `${d.conceptoClave || d.conceptoKey.slice(0, 10)} `),
-          h('span', { class: 'mono', style: { fontSize: '12px' } }, d.monto.toLocaleString('es-MX', { style: 'currency', currency: 'MXN' }))
+          h('span', { class: 'mono', style: { fontSize: '12px' } }, money(d.monto))
         ])),
-        h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '10px', marginTop: '6px', paddingTop: '6px', borderTop: '1px solid var(--border)', fontWeight: 600 } }, [
-          h('span', {}, 'Total'),
-          h('span', { class: 'mono' }, total.toLocaleString('es-MX', { style: 'currency', currency: 'MXN' }))
+        h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '10px', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--border)' } }, [
+          h('span', { class: 'muted' }, 'Subtotal'), h('span', { class: 'mono', style: { fontSize: '12px' } }, money(subtotal))
+        ]),
+        h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '10px' } }, [
+          h('span', { class: 'muted' }, 'IVA'), ivaVal
+        ]),
+        h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '10px', marginTop: '4px', paddingTop: '4px', borderTop: '1px solid var(--border)', fontWeight: 600 } }, [
+          h('span', {}, 'Total'), totalVal
         ])
       ]),
       h('p', { class: 'muted', style: { fontSize: '12px' } },
@@ -609,6 +667,9 @@ async function onEnviarContador(obraId, recId, rec, conceptos) {
         const u = state.user;
         await enviarRecepcionABuzon(obraId, recId, {
           uid: u.uid, displayName: u.displayName || '', email: u.email || ''
+        }, {
+          formaPago: formaSel.value,
+          facturaTotal: Number(facturaInput.value) || 0
         });
         toast('Recepción enviada al contador', 'ok');
         renderRecepcionDetalle({ params: { id: obraId, recid: recId } });

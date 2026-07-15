@@ -76,20 +76,35 @@ La recepción pasa a `estado='enviada_buzon'` + `buzonId`. El payload es self-co
   numero,
   origenTipo: 'oc',
   reqId,                // requisición vinculada, si la hay (o null)
-  monto, fecha, comentario,
+  formaPago,            // 'credito' | 'efectivo' | 'transferencia' | 'caja_chica'
+  monto,                // total del gasto CON IVA (== total). Compat: úsalo como total.
+  subtotal,             // suma de items SIN IVA (== sum(desglose.monto))
+  iva,                  // facturaTotal − subtotal (0 si no se capturó factura)
+  total,                // total con IVA (alias de monto)
+  facturaTotal,         // total de la factura capturado por el almacenista (o null)
+  fecha, comentario,
   proveedor, factura,
   items: [{ materialKey, clave, descripcion, unidad, cantidad, costoUnitario, importe, conceptoKey }, ...],
-  desglose: [{ conceptoKey, conceptoClave, conceptoDescripcion, monto }, ...],   // sum(monto) === monto total
+  desglose: [{ conceptoKey, conceptoClave, conceptoDescripcion, monto }, ...],   // SIN IVA, sum(monto) === subtotal
   autor: { uid, displayName, email },
   estado: 'recibido' | 'en_revision' | 'aprobado' | 'rechazado' | 'huerfano'
 }
 ```
-**Garantía del emisor**: solo se envía si TODOS los items tienen `conceptoKey` y el importe > 0,
-así que `sum(desglose.monto) === monto`. **Lo que debe hacer bitácora al aprobar**: crear el
-gasto contable con `categoria='Materiales'` y `desglose_presupuesto` mapeado por `conceptoKey`,
-asociado al proyecto vía `/shared/obraLinks/{obraId}`. Al cambiar el estado (aprobado/rechazado,
-con `motivoRechazo`), sincronizarlo de regreso al item del buzón — esta app lo lee por `buzonId`
-para mostrar el estado y, si se rechaza, permitir "↺ Reabrir" y reenviar.
+**Garantía del emisor**: solo se envía si TODOS los items tienen `conceptoKey` y el subtotal > 0,
+así que `sum(desglose.monto) === subtotal` y `subtotal + iva === total === monto`.
+**Es un GASTO (por pagar/pagado), NO un ingreso** — el stepper correcto es *Devengado → Por pagar → Pagado*, no *por cobrar*.
+**Lo que debe hacer bitácora al aprobar**: crear el gasto contable con `categoria='Materiales'`,
+importe = `total` (subtotal + iva), y `desglose_presupuesto` mapeado por `conceptoKey` (montos SIN
+IVA, suman `subtotal`; el IVA es acreditable, línea aparte), asociado al proyecto vía
+`/shared/obraLinks/{obraId}`. El **`formaPago`** define la liquidación:
+- `credito` → gasto + cuenta por pagar (CxP); queda *por pagar* hasta que se liquide.
+- `efectivo` → gasto YA pagado (salida de efectivo), sin CxP.
+- `transferencia` → gasto YA pagado (salida de banco), sin CxP; concilia contra el banco.
+- `caja_chica` → gasto pagado desde el fondo formal de caja chica (afecta su saldo).
+
+Al cambiar el estado (aprobado/rechazado, con `motivoRechazo`), sincronizarlo de regreso al item
+del buzón — esta app lo lee por `buzonId` para mostrar el estado y, si se rechaza, permitir
+"↺ Reabrir" y reenviar.
 
 ### `deposito_caja_chica`
 Publicado al **solicitar** un depósito (cualquier método). El depósito nace en `/shared/cajaChica` con `estado='solicitado'` y NO afecta saldo hasta que el contador apruebe en bitácora.
