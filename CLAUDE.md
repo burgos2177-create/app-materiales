@@ -35,7 +35,7 @@ App web para el almacenista de obra. Sister app de **app-estimaciones** (ingenie
 | Origen (app-materiales)            | Destino contador (`appsogrub`)              | Destino compras (futura)        |
 |------------------------------------|---------------------------------------------|---------------------------------|
 | Requisición                        | ❌                                          | ✅ (cotiza, genera OC)          |
-| Recepción tipo OC                  | ✅ solo cuando compras la apruebe (futuro)  | ✅ recibe primero               |
+| Recepción tipo OC                  | ✅ vía `gasto_oc` (contador aprueba y registra el gasto) | ✅ (futuro: compras concilia la OC) |
 | Recepción tipo caja_chica          | ✅ vía `gasto_caja_chica`                   | ❌                              |
 | Salida (consumo de almacén)        | ❌ (info interna del almacén)               | ❌                              |
 | Caja chica · depósito transferencia| ✅ vía `deposito_caja_chica`                | ❌                              |
@@ -62,6 +62,35 @@ Reportado al crear/actualizar el gasto desde una recepción de caja chica.
 ```
 **Lo que debe hacer bitácora al aprobar**: crear gasto contable bajo `categoria='Caja chica'` (o similar) con `desglose_presupuesto` mapeado por `conceptoKey`, asociado al proyecto resuelto vía `/shared/obraLinks/{obraId}`. Al cambiar el estado en bitácora, sincronizar al item del buzón y vía hook al `/shared/cajaChica/{obraId}/movimientos/{movimientoId}` para que el saldo conciliado refleje el cambio en ambas apps.
 
+### `gasto_oc`
+Publicado al enviar una recepción **de OC** al contador (botón "↗ Enviar al contador").
+La recepción pasa a `estado='enviada_buzon'` + `buzonId`. El payload es self-contained
+(bitácora no necesita leer la recepción ni el catálogo).
+```js
+{
+  tipo: 'gasto_oc',
+  origenApp: 'materiales',
+  obraId,
+  refRecepcionId,       // id en obras/{obraId}/recepciones
+  folio,                // 'E-0006'
+  numero,
+  origenTipo: 'oc',
+  reqId,                // requisición vinculada, si la hay (o null)
+  monto, fecha, comentario,
+  proveedor, factura,
+  items: [{ materialKey, clave, descripcion, unidad, cantidad, costoUnitario, importe, conceptoKey }, ...],
+  desglose: [{ conceptoKey, conceptoClave, conceptoDescripcion, monto }, ...],   // sum(monto) === monto total
+  autor: { uid, displayName, email },
+  estado: 'recibido' | 'en_revision' | 'aprobado' | 'rechazado' | 'huerfano'
+}
+```
+**Garantía del emisor**: solo se envía si TODOS los items tienen `conceptoKey` y el importe > 0,
+así que `sum(desglose.monto) === monto`. **Lo que debe hacer bitácora al aprobar**: crear el
+gasto contable con `categoria='Materiales'` y `desglose_presupuesto` mapeado por `conceptoKey`,
+asociado al proyecto vía `/shared/obraLinks/{obraId}`. Al cambiar el estado (aprobado/rechazado,
+con `motivoRechazo`), sincronizarlo de regreso al item del buzón — esta app lo lee por `buzonId`
+para mostrar el estado y, si se rechaza, permitir "↺ Reabrir" y reenviar.
+
 ### `deposito_caja_chica`
 Publicado al **solicitar** un depósito (cualquier método). El depósito nace en `/shared/cajaChica` con `estado='solicitado'` y NO afecta saldo hasta que el contador apruebe en bitácora.
 ```js
@@ -84,7 +113,7 @@ Publicado al **solicitar** un depósito (cualquier método). El depósito nace e
 
 `appsogrub` debe agregar:
 1. Vista de caja chica por obra leyendo `/shared/cajaChica/{obraId}/{meta,movimientos}`. Mismo patrón que aquí pero con la perspectiva contable (botones para asentar el movimiento bancario).
-2. Manejo de los dos nuevos `tipo` del buzón: `gasto_caja_chica` y `deposito_caja_chica`. Las máquinas de estado existentes (`recibido → en_revision → aprobado → cerrado`) ya cubren el flujo. Folios atómicos según el tipo (CC para depósito, CP para gasto).
+2. Manejo de los nuevos `tipo` del buzón: `gasto_caja_chica`, `deposito_caja_chica` y `gasto_oc`. Las máquinas de estado existentes (`recibido → en_revision → aprobado → cerrado`) ya cubren el flujo. Folios atómicos según el tipo (CC para depósito, CP para gasto de caja chica, y el gasto de OC va a `categoria='Materiales'` con su `desglose_presupuesto` por `conceptoKey`). Para `gasto_oc` el hook bidireccional escribe de regreso a `/shared/materiales/{obraId}/recepciones/{refRecepcionId}` (o al item del buzón, que la app lee por `buzonId`) el `estado` y el `motivoRechazo`.
 3. Hook bidireccional: cuando el contador cambia el estado en bitácora, también escribir en `/shared/cajaChica/{obraId}/movimientos/{movimientoId}` para que esta app refleje el cambio. Patrón análogo al ya existente entre estimaciones y bitácora vía `origen_buzon_id`.
 
 ## Modelo de datos (Firebase RTDB)

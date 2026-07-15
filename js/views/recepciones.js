@@ -19,7 +19,8 @@ import {
   listRequisiciones, getRequisicion,
   findMovimientoCajaChicaByRecepcion, addMovimientoCajaChica,
   updateMovimientoCajaChica, deleteMovimientoCajaChica,
-  pushBuzonItem, updateBuzonItem, deleteBuzonItem
+  pushBuzonItem, updateBuzonItem, deleteBuzonItem,
+  getBuzonItem, enviarRecepcionABuzon
 } from '../services/db.js';
 import { navigate } from '../state/router.js';
 import { num, num0, money, dateMx } from '../util/format.js';
@@ -204,18 +205,26 @@ export async function renderRecepcionDetalle({ params }) {
   }
   setState({ catalogo: catMat, conceptos: catCon?.conceptos || null });
 
+  // Estado en el buzón del contador (solo recepciones de OC ya enviadas).
+  const buzonItem = rec.buzonId ? await getBuzonItem(rec.buzonId) : null;
+  const buzonActivo = buzonItem && !['rechazado', 'huerfano'].includes(buzonItem.estado);
+
   const folio = `E-${String(rec.numero || 0).padStart(4, '0')}`;
   const conceptos = catCon?.conceptos || {};
   const materiales = catMat?.items || {};
-  const editable = rec.estado === 'borrador';
+  const editable = rec.estado === 'borrador' && !buzonActivo;
   const isCajaChica = rec.origenTipo === 'caja_chica';
+  const isOC = rec.origenTipo === 'oc';
   const totalRec = Number(rec.totalRecepcion) || 0;
   const movMonto = ccMov ? Number(ccMov.mov.monto) || 0 : 0;
   const movEstado = ccMov?.mov?.estado || null;
   const needsUpdate = ccMov && Math.abs(movMonto - totalRec) > 0.01;
 
   const head = h('div', { class: 'row' }, [
-    h('h1', {}, [folio, ' ', estadoBadge(rec.estado), ' ', origenBadge(rec.origenTipo)]),
+    h('h1', {}, [
+      folio, ' ', estadoBadge(rec.estado), ' ', origenBadge(rec.origenTipo),
+      buzonItem && ' ', buzonItem && buzonGastoBadge(buzonItem.estado)
+    ]),
     h('div', { style: { flex: 1 } }),
     editable && h('button', {
       class: 'btn primary',
@@ -235,14 +244,21 @@ export async function renderRecepcionDetalle({ params }) {
             onClick: () => onActualizarCajaChica(obraId, recId, rec, ccMov)
           }, '🔄 Actualizar reporte')
         : null),
-    editable && h('button', {
-      class: 'btn',
-      title: 'En construcción — mandará al buzón hacia bitácora',
-      disabled: true
-    }, '↗ Enviar al contador (próximamente)')
+    // OC → contador (bitácora). Publica gasto_oc al buzón para aprobar/registrar.
+    isOC && editable && h('button', {
+      class: 'btn primary',
+      title: 'Envía esta recepción al buzón del contador para que apruebe y registre el gasto',
+      disabled: totalRec <= 0,
+      onClick: () => onEnviarContador(obraId, recId, rec, conceptos)
+    }, '↗ Enviar al contador'),
+    // Reabrir si el contador la rechazó (o quedó huérfana) — vuelve a borrador.
+    isOC && rec.estado === 'enviada_buzon' && !buzonActivo && h('button', {
+      class: 'btn ghost',
+      onClick: () => onReabrirRecepcion(obraId, recId)
+    }, '↺ Reabrir')
   ]);
 
-  const metaCard = renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov);
+  const metaCard = renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzonItem);
   const itemsCard = renderItemsCard(obraId, recId, rec, materiales, conceptos, editable);
 
   renderShell(crumbs(obraId, meta?.nombre, folio), h('div', {}, [head, metaCard, itemsCard]));
@@ -377,7 +393,7 @@ async function onActualizarCajaChica(obraId, recId, rec, ccMov) {
   });
 }
 
-function renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov) {
+function renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzonItem) {
   const fechaInput = h('input', { type: 'date', value: toDateInputVal(rec.fecha), disabled: !editable });
   fechaInput.addEventListener('change', async () => {
     const ms = fechaInput.value ? new Date(fechaInput.value + 'T12:00').getTime() : Date.now();
@@ -465,6 +481,7 @@ function renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov) {
       kv('Recibido por', rec.recibidoPor?.displayName || rec.recibidoPor?.email || '—'),
       ...vinculoCards,
       ccMov ? h('div', { style: { gridColumn: 'span 3' } }, [renderCajaChicaStatus(obraId, ccMov, rec)]) : null,
+      buzonItem ? h('div', { style: { gridColumn: 'span 3' } }, [renderContadorStatus(buzonItem)]) : null,
       h('div', { class: 'field', style: { gridColumn: 'span 3' } }, [h('label', {}, 'Notas'), notasInput])
     ])
   ]);
@@ -491,6 +508,131 @@ function renderCajaChicaStatus(obraId, ccMov, rec) {
       h('a', { href: `#/obras/${obraId}/caja-chica`, style: { fontSize: '12px', marginLeft: 'auto' } }, 'Ver caja chica →')
     ])
   ]);
+}
+
+// Badge del estado del gasto en el buzón del contador (máquina de estados
+// de la suite: recibido → en_revision → aprobado → rechazado).
+function buzonGastoBadge(estado) {
+  if (estado === 'recibido') return h('span', { class: 'tag warn' }, '📥 Recibido por contador');
+  if (estado === 'en_revision') return h('span', { class: 'tag warn' }, '👁 En revisión');
+  if (estado === 'aprobado') return h('span', { class: 'tag ok' }, '✓ Aprobado y registrado');
+  if (estado === 'cerrado') return h('span', { class: 'tag ok' }, '🔒 Cerrado');
+  if (estado === 'rechazado') return h('span', { class: 'tag danger' }, '✕ Rechazado por contador');
+  if (estado === 'huerfano') return h('span', { class: 'tag warn' }, '⚠ Huérfano');
+  return h('span', { class: 'tag muted' }, estado || '—');
+}
+
+function renderContadorStatus(buzonItem) {
+  const ts = buzonItem.actualizadoAt
+    ? `actualizado ${new Date(buzonItem.actualizadoAt).toLocaleString('es-MX')}`
+    : (buzonItem.creadoAt ? `enviado ${new Date(buzonItem.creadoAt).toLocaleString('es-MX')}` : '');
+  return h('div', {
+    style: { padding: '10px 12px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: '6px' }
+  }, [
+    h('div', { class: 'muted', style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.4px' } }, 'Contador (bitácora)'),
+    h('div', { class: 'row', style: { marginTop: '6px', gap: '10px' } }, [
+      buzonGastoBadge(buzonItem.estado),
+      ts && h('span', { class: 'muted', style: { fontSize: '12px' } }, ts)
+    ]),
+    buzonItem.estado === 'rechazado' && buzonItem.motivoRechazo && h('div', {
+      class: 'tag danger', style: { marginTop: '8px', whiteSpace: 'normal', maxWidth: '100%' }
+    }, [h('b', {}, 'Motivo del rechazo: '), buzonItem.motivoRechazo]),
+    buzonItem.estado === 'aprobado' && h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '6px' } },
+      'El contador registró el gasto en contabilidad (categoría Materiales) con el desglose por concepto.'),
+    (buzonItem.estado === 'rechazado' || buzonItem.estado === 'huerfano') && h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '6px' } },
+      'Puedes reabrirla para corregir y reenviar.')
+  ]);
+}
+
+// Envía la recepción de OC al buzón del contador (tipo gasto_oc).
+async function onEnviarContador(obraId, recId, rec, conceptos) {
+  const items = Object.values(rec.items || {}).filter(it => it.materialKey);
+  const total = Number(rec.totalRecepcion) || 0;
+  if (items.length === 0) { toast('Agrega items primero', 'warn'); return; }
+  if (total <= 0) { toast('La recepción no tiene importe (agrega costo a los items)', 'warn'); return; }
+
+  // Todos los items deben tener concepto — el gasto se desglosa por concepto.
+  const sinConcepto = items.filter(it => !it.conceptoKey);
+  if (sinConcepto.length > 0) {
+    const materiales = state.catalogo?.items || {};
+    await modal({
+      title: 'Faltan conceptos por asignar',
+      body: h('div', {}, [
+        h('p', {}, [
+          h('b', {}, sinConcepto.length),
+          ` item(s) no tienen concepto OPUS asignado. El gasto se registra desglosado por concepto, así que cada material debe tener uno antes de enviar al contador.`
+        ]),
+        h('ul', { style: { margin: '8px 0 0', paddingLeft: '18px', fontSize: '13px' } },
+          sinConcepto.slice(0, 12).map(it => {
+            const m = materiales[it.materialKey] || {};
+            return h('li', { style: { marginBottom: '2px' } }, `${m.clave || it.materialKey} — ${m.descripcion || ''}`);
+          })),
+        h('p', { class: 'muted', style: { fontSize: '12px', marginTop: '8px' } },
+          'Edita cada item (✎) y elige su concepto destino.')
+      ]),
+      confirmLabel: 'Entendido'
+    });
+    return;
+  }
+
+  const desglose = buildDesgloseFromRecepcion(rec, conceptos);
+  const folio = `E-${String(rec.numero).padStart(4, '0')}`;
+  await modal({
+    title: 'Enviar recepción al contador',
+    body: h('div', {}, [
+      h('p', {}, [
+        `Se enviará la recepción ${folio} por `,
+        h('b', {}, total.toLocaleString('es-MX', { style: 'currency', currency: 'MXN' })),
+        ' al buzón del contador (bitácora) para que apruebe y registre el gasto.'
+      ]),
+      h('div', {
+        style: { margin: '10px 0', padding: '10px 12px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '13px' }
+      }, [
+        h('div', { class: 'muted', style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '.4px', marginBottom: '6px' } },
+          `Desglose por concepto (${desglose.length})`),
+        ...desglose.map(d => h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '10px' } }, [
+          h('span', { class: 'mono', style: { fontSize: '12px' }, title: d.conceptoDescripcion || '' },
+            `${d.conceptoClave || d.conceptoKey.slice(0, 10)} `),
+          h('span', { class: 'mono', style: { fontSize: '12px' } }, d.monto.toLocaleString('es-MX', { style: 'currency', currency: 'MXN' }))
+        ])),
+        h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '10px', marginTop: '6px', paddingTop: '6px', borderTop: '1px solid var(--border)', fontWeight: 600 } }, [
+          h('span', {}, 'Total'),
+          h('span', { class: 'mono' }, total.toLocaleString('es-MX', { style: 'currency', currency: 'MXN' }))
+        ])
+      ]),
+      h('p', { class: 'muted', style: { fontSize: '12px' } },
+        'Mientras esté con el contador no se puede editar. Si la rechaza, podrás reabrirla para corregir y reenviar.')
+    ]),
+    confirmLabel: '↗ Enviar al contador',
+    onConfirm: async () => {
+      try {
+        const u = state.user;
+        await enviarRecepcionABuzon(obraId, recId, {
+          uid: u.uid, displayName: u.displayName || '', email: u.email || ''
+        });
+        toast('Recepción enviada al contador', 'ok');
+        renderRecepcionDetalle({ params: { id: obraId, recid: recId } });
+        return true;
+      } catch (err) {
+        toast('Error: ' + err.message, 'danger');
+        return false;
+      }
+    }
+  });
+}
+
+async function onReabrirRecepcion(obraId, recId) {
+  await modal({
+    title: 'Reabrir recepción',
+    body: h('div', {}, 'Vuelve a estado borrador para editar items y reenviar al contador.'),
+    confirmLabel: 'Reabrir',
+    onConfirm: async () => {
+      await setRecepcionEstado(obraId, recId, 'borrador');
+      toast('Recepción reabierta', 'ok');
+      renderRecepcionDetalle({ params: { id: obraId, recid: recId } });
+      return true;
+    }
+  });
 }
 
 // Si la req tiene items, ofrece importarlos a la recepción.

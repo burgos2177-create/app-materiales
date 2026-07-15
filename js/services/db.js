@@ -367,6 +367,113 @@ export async function setRecepcionEstado(obraId, recId, estado, extra = {}) {
   return rupdate(`obras/${obraId}/recepciones/${recId}`, { estado, ...extra, updatedAt: Date.now() });
 }
 
+// Envía una recepción de OC al buzón cross-app con tipo='gasto_oc' para que
+// bitácora (contador) la apruebe y asiente como gasto contable (categoría
+// Materiales) con desglose por concepto OPUS. Espejo de enviarRequisicionABuzon:
+//   1. Snapshot self-contained en el buzón (items enriquecidos con clave/desc
+//      del catálogo + desglose por conceptoKey) — bitácora no necesita leer
+//      la recepción ni el catálogo original.
+//   2. estado='recibido' en el buzón (entrada de la máquina de estados de la
+//      suite: recibido → en_revision → aprobado → rechazado).
+//   3. En la recepción: estado='enviada_buzon' + buzonId (referencia inversa
+//      para mostrar el estado del contador en la UI del almacenista).
+//
+// Requisitos: recepción tipo 'oc', con importe > 0 y TODOS los items con
+// conceptoKey (el gasto contable se desglosa por concepto — no puede haber
+// importe sin concepto o el desglose no cuadraría con el total).
+// Idempotente: si ya hay un buzonId activo (no rechazado/huerfano), no republica.
+export async function enviarRecepcionABuzon(obraId, recId, autor) {
+  const rec = await rread(`obras/${obraId}/recepciones/${recId}`);
+  if (!rec) throw new Error('Recepción no encontrada');
+  if (rec.origenTipo !== 'oc') {
+    throw new Error('Solo las recepciones de OC se envían al contador por esta vía (las de caja chica usan "Reportar a caja chica")');
+  }
+  if (rec.buzonId) {
+    const existente = await rread(`/shared/buzon/${rec.buzonId}`);
+    if (existente && !['rechazado', 'huerfano'].includes(existente.estado)) {
+      throw new Error('Esta recepción ya está en el buzón del contador');
+    }
+  }
+  const itemsRaw = Object.values(rec.items || {}).filter(it => it.materialKey);
+  if (itemsRaw.length === 0) throw new Error('La recepción no tiene items');
+
+  const total = Number(rec.totalRecepcion) || 0;
+  if (total <= 0) throw new Error('La recepción no tiene importe (agrega costo a los items)');
+
+  // Todos los items deben tener concepto — el gasto se desglosa por concepto.
+  const sinConcepto = itemsRaw.filter(it => !it.conceptoKey);
+  if (sinConcepto.length > 0) {
+    throw new Error(`${sinConcepto.length} item(s) sin concepto asignado. Asigna un concepto OPUS a cada material antes de enviar.`);
+  }
+
+  const catCon = await loadCatalogoConceptos(obraId);
+  const conceptos = catCon?.conceptos || {};
+  const catMat = await loadCatalogoMateriales(obraId);
+  const materiales = catMat?.items || {};
+
+  // Snapshot enriquecido de items (self-contained para bitácora).
+  const items = itemsRaw.map(it => {
+    const m = materiales[it.materialKey] || {};
+    const cantidad = Number(it.cantidad) || 0;
+    const costoUnitario = Number(it.costoUnitario) || 0;
+    return {
+      materialKey: it.materialKey,
+      clave: m.clave || null,
+      descripcion: m.descripcion || null,
+      unidad: m.unidad || null,
+      cantidad,
+      costoUnitario,
+      importe: +(cantidad * costoUnitario).toFixed(2),
+      conceptoKey: it.conceptoKey || null
+    };
+  });
+
+  // Desglose por concepto (para desglose_presupuesto del gasto contable).
+  const acum = new Map();
+  for (const it of items) {
+    acum.set(it.conceptoKey, (acum.get(it.conceptoKey) || 0) + it.importe);
+  }
+  const desglose = [...acum].map(([ck, monto]) => {
+    const c = conceptos[ck];
+    return {
+      conceptoKey: ck,
+      conceptoClave: c?.clave || null,
+      conceptoDescripcion: c?.descripcion || null,
+      monto: +monto.toFixed(2)
+    };
+  });
+
+  const folio = `E-${String(rec.numero || 0).padStart(4, '0')}`;
+  const buzonItem = {
+    tipo: 'gasto_oc',
+    origenApp: 'materiales',
+    obraId,
+    refRecepcionId: recId,
+    folio,
+    numero: rec.numero || 0,
+    origenTipo: 'oc',
+    reqId: rec.origenRef?.reqId || null,
+    monto: +total.toFixed(2),
+    fecha: rec.fecha || Date.now(),
+    comentario: `Recepción ${folio}` + (rec.proveedor ? ` · ${rec.proveedor}` : ''),
+    proveedor: rec.proveedor || null,
+    factura: rec.factura || null,
+    desglose,
+    items,
+    autor: autor || rec.recibidoPor || null,
+    estado: 'recibido',
+    creadoAt: Date.now()
+  };
+  const buzonId = await rpush('/shared/buzon', buzonItem);
+  await rupdate(`obras/${obraId}/recepciones/${recId}`, {
+    estado: 'enviada_buzon',
+    buzonId,
+    enviadaBuzonAt: Date.now(),
+    updatedAt: Date.now()
+  });
+  return buzonId;
+}
+
 // === Requisiciones ===
 //
 // Modelo (ver CLAUDE.md):
