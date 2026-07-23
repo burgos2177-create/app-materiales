@@ -53,9 +53,14 @@ Reportado al crear/actualizar el gasto desde una recepción de caja chica.
   obraId,
   movimientoId,         // id en /shared/cajaChica/{obraId}/movimientos
   refRecepcionId,       // id en obras/{obraId}/recepciones
-  monto, fecha, comentario,
+  ivaMode,              // 'sin_iva' | 'mas_iva' | 'iva_incluido'
+  monto,                // total CON IVA (== total). El movimiento de caja chica usa este.
+  subtotal,             // SIN IVA (== sum(desglose.monto))
+  iva,                  // según ivaMode
+  total,                // alias de monto
+  fecha, comentario,
   proveedor, factura,
-  desglose: [{ conceptoKey, conceptoClave, conceptoDescripcion, monto }, ...],
+  desglose: [{ conceptoKey, conceptoClave, conceptoDescripcion, monto }, ...],   // SIN IVA, sum === subtotal
   autor: { uid, displayName, email },
   estado: 'recibido' | 'en_revision' | 'aprobado' | 'rechazado' | 'huerfano'
 }
@@ -77,11 +82,11 @@ La recepción pasa a `estado='enviada_buzon'` + `buzonId`. El payload es self-co
   origenTipo: 'oc',
   reqId,                // requisición vinculada, si la hay (o null)
   formaPago,            // 'credito' | 'efectivo' | 'transferencia' | 'caja_chica'
+  ivaMode,              // 'sin_iva' | 'mas_iva' | 'iva_incluido' (cómo se derivó el IVA)
   monto,                // total del gasto CON IVA (== total). Compat: úsalo como total.
   subtotal,             // suma de items SIN IVA (== sum(desglose.monto))
-  iva,                  // facturaTotal − subtotal (0 si no se capturó factura)
+  iva,                  // IVA calculado según ivaMode
   total,                // total con IVA (alias de monto)
-  facturaTotal,         // total de la factura capturado por el almacenista (o null)
   fecha, comentario,
   proveedor, factura,
   items: [{ materialKey, clave, descripcion, unidad, cantidad, costoUnitario, importe, conceptoKey }, ...],
@@ -158,7 +163,11 @@ Publicado al **solicitar** un depósito (cualquier método). El depósito nace e
   fecha, recibidoPor,
   origenTipo: 'oc' | 'caja_chica',
   origenRef,                  # reqId si oc, ticketUrl si caja_chica
-  proveedor, factura?, totalRecepcion,
+  proveedor, factura?,
+  totalRecepcion,             # BASE = suma de items (cantidad×costo)
+  ivaMode: 'sin_iva' | 'mas_iva' | 'iva_incluido',   # default 'sin_iva'
+  ivaRate,                    # default 0.16. subtotal/iva/total se derivan (ver computeRecepcionMontos)
+  formaPago?,                 # al enviar OC: credito|efectivo|transferencia|caja_chica
   items: [{ materialKey, cantidad, costoUnitario, conceptoKey? }],
   fotos: [driveFileId, ...],
   buzonId     # set al enviar a bitácora

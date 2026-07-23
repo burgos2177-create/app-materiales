@@ -20,7 +20,8 @@ import {
   findMovimientoCajaChicaByRecepcion, addMovimientoCajaChica,
   updateMovimientoCajaChica, deleteMovimientoCajaChica,
   pushBuzonItem, updateBuzonItem, deleteBuzonItem,
-  getBuzonItem, enviarRecepcionABuzon
+  getBuzonItem, enviarRecepcionABuzon,
+  computeRecepcionMontos, buildDesgloseRecepcion as buildDesgloseFromRecepcion
 } from '../services/db.js';
 import { navigate } from '../state/router.js';
 import { num, num0, money, dateMx } from '../util/format.js';
@@ -87,7 +88,7 @@ function recepcionRow(obraId, recId, r) {
     h('td', {}, origenBadge(r.origenTipo)),
     h('td', { class: 'muted' }, r.proveedor || '—'),
     h('td', { class: 'num' }, num0(itemsCount)),
-    h('td', { class: 'num' }, money(r.totalRecepcion || 0)),
+    h('td', { class: 'num' }, money(computeRecepcionMontos(r).total)),
     h('td', {}, estadoBadge(r.estado)),
     h('td', {}, r.estado === 'borrador' && h('button', {
       class: 'btn sm danger',
@@ -215,7 +216,8 @@ export async function renderRecepcionDetalle({ params }) {
   const editable = rec.estado === 'borrador' && !buzonActivo;
   const isCajaChica = rec.origenTipo === 'caja_chica';
   const isOC = rec.origenTipo === 'oc';
-  const totalRec = Number(rec.totalRecepcion) || 0;
+  const montos = computeRecepcionMontos(rec);
+  const totalRec = montos.total;   // total con IVA (lo que se gastó / reporta)
   const movMonto = ccMov ? Number(ccMov.mov.monto) || 0 : 0;
   const movEstado = ccMov?.mov?.estado || null;
   const needsUpdate = ccMov && Math.abs(movMonto - totalRec) > 0.01;
@@ -264,33 +266,12 @@ export async function renderRecepcionDetalle({ params }) {
   renderShell(crumbs(obraId, meta?.nombre, folio), h('div', {}, [head, metaCard, itemsCard]));
 }
 
-// Construye el desglose por concepto desde los items de la recepción.
-// La futura vista del contador/aprobador en bitácora puede usar esto para
-// generar el desglose_presupuesto al asentar el gasto.
-function buildDesgloseFromRecepcion(rec, conceptos) {
-  const acum = new Map();   // conceptoKey → monto
-  for (const it of Object.values(rec.items || {})) {
-    if (!it.materialKey) continue;
-    const ck = it.conceptoKey || null;
-    const monto = (Number(it.cantidad) || 0) * (Number(it.costoUnitario) || 0);
-    if (!ck) continue;
-    acum.set(ck, (acum.get(ck) || 0) + monto);
-  }
-  const out = [];
-  for (const [ck, monto] of acum) {
-    const c = conceptos?.[ck];
-    out.push({
-      conceptoKey: ck,
-      conceptoClave: c?.clave || null,
-      conceptoDescripcion: c?.descripcion || null,
-      monto: +monto.toFixed(2)
-    });
-  }
-  return out;
-}
+// El desglose por concepto (consciente del modo IVA) vive en db.js
+// (buildDesgloseRecepcion, importado arriba como buildDesgloseFromRecepcion).
 
 async function onReportarCajaChica(obraId, recId, rec) {
-  const total = Number(rec.totalRecepcion) || 0;
+  const montos = computeRecepcionMontos(rec);
+  const total = montos.total;   // total con IVA — lo que realmente salió de la caja
   if (total <= 0) { toast('Agrega items con costo primero', 'warn'); return; }
   const conceptos = state.conceptos || {};
   await modal({
@@ -327,7 +308,11 @@ async function onReportarCajaChica(obraId, recId, rec) {
           obraId,
           movimientoId: movId,
           refRecepcionId: recId,
-          monto: total,
+          ivaMode: rec.ivaMode || 'sin_iva',
+          monto: total,               // total con IVA (== subtotal + iva)
+          subtotal: montos.subtotal,  // sin IVA (== sum(desglose.monto))
+          iva: montos.iva,
+          total,
           fecha: rec.fecha || Date.now(),
           comentario,
           proveedor: rec.proveedor || null,
@@ -349,7 +334,8 @@ async function onReportarCajaChica(obraId, recId, rec) {
 }
 
 async function onActualizarCajaChica(obraId, recId, rec, ccMov) {
-  const total = Number(rec.totalRecepcion) || 0;
+  const montos = computeRecepcionMontos(rec);
+  const total = montos.total;   // total con IVA
   const conceptos = state.conceptos || {};
   await modal({
     title: 'Actualizar reporte de caja chica',
@@ -376,7 +362,11 @@ async function onActualizarCajaChica(obraId, recId, rec, ccMov) {
       if (ccMov.mov.buzonItemId) {
         try {
           await updateBuzonItem(ccMov.mov.buzonItemId, {
+            ivaMode: rec.ivaMode || 'sin_iva',
             monto: total,
+            subtotal: montos.subtotal,
+            iva: montos.iva,
+            total,
             estado: 'recibido',
             fecha: rec.fecha || Date.now(),
             comentario,
@@ -470,15 +460,60 @@ function renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzo
     ]));
   }
 
+  // ---- IVA de la recepción (cómo cuadra el total que se reporta al contador) ----
+  const montos = computeRecepcionMontos(rec);
+  const ivaModeActual = rec.ivaMode || 'sin_iva';
+  const IVA_MODES = [
+    { v: 'sin_iva', label: 'Sin IVA (exento) — total = subtotal, no suma ni divide' },
+    { v: 'mas_iva', label: 'Precio SIN IVA — súmale IVA (subtotal × factor)' },
+    { v: 'iva_incluido', label: 'Precio YA con IVA — extráelo (total ÷ factor)' }
+  ];
+  const ivaModeSel = h('select', { disabled: !editable },
+    IVA_MODES.map(o => h('option', { value: o.v, selected: ivaModeActual === o.v }, o.label)));
+  ivaModeSel.value = ivaModeActual;
+  ivaModeSel.addEventListener('change', async () => {
+    await updateRecepcion(obraId, recId, { ivaMode: ivaModeSel.value });
+    renderRecepcionDetalle({ params: { id: obraId, recid: recId } });
+  });
+
+  const ratePct = Math.round((montos.rate || 0.16) * 100);
+  const ivaRateInput = h('input', {
+    type: 'number', min: '0', max: '100', step: '0.5', value: String(ratePct),
+    disabled: !editable || ivaModeActual === 'sin_iva', style: { width: '80px' }
+  });
+  ivaRateInput.addEventListener('change', async () => {
+    const rate = Math.max(0, (Number(ivaRateInput.value) || 0) / 100);
+    await updateRecepcion(obraId, recId, { ivaRate: rate });
+    renderRecepcionDetalle({ params: { id: obraId, recid: recId } });
+  });
+
+  const ivaBlock = h('div', { class: 'field', style: { gridColumn: 'span 3' } }, [
+    h('label', {}, 'IVA · cómo cuadra el total que se reporta al contador'),
+    h('div', { class: 'row', style: { gap: '10px', flexWrap: 'wrap', alignItems: 'center' } }, [
+      h('div', { style: { flex: '1', minWidth: '280px' } }, ivaModeSel),
+      ivaModeActual !== 'sin_iva' ? h('div', { class: 'row', style: { gap: '6px', alignItems: 'center' } }, [
+        h('span', { class: 'muted', style: { fontSize: '12px' } }, 'IVA %'), ivaRateInput
+      ]) : null
+    ]),
+    h('div', { style: { marginTop: '8px', padding: '8px 12px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: '6px' } }, [
+      h('div', { class: 'row', style: { gap: '20px', flexWrap: 'wrap', alignItems: 'baseline' } }, [
+        h('span', { class: 'muted', style: { fontSize: '12px' } }, ['Subtotal ', h('span', { class: 'mono', style: { color: 'var(--text-0)' } }, money(montos.subtotal))]),
+        h('span', { class: 'muted', style: { fontSize: '12px' } }, ['IVA ', h('span', { class: 'mono', style: { color: 'var(--text-0)' } }, money(montos.iva))]),
+        h('span', { style: { fontSize: '13px', fontWeight: 600 } }, ['Total a reportar ', h('span', { class: 'mono' }, money(montos.total))])
+      ])
+    ])
+  ]);
+
   return h('div', { class: 'card' }, [
     h('h3', {}, 'Datos'),
     h('div', { class: 'grid-3' }, [
       kv('Folio', `E-${String(rec.numero || 0).padStart(4, '0')}`),
       h('div', { class: 'field' }, [h('label', {}, 'Fecha'), fechaInput]),
-      kv('Total recepción', money(rec.totalRecepcion || 0)),
+      kv('Total a reportar', money(montos.total)),
       h('div', { class: 'field' }, [h('label', {}, 'Proveedor'), proveedorInput]),
       h('div', { class: 'field' }, [h('label', {}, 'Factura'), facturaInput]),
       kv('Recibido por', rec.recibidoPor?.displayName || rec.recibidoPor?.email || '—'),
+      ivaBlock,
       ...vinculoCards,
       ccMov ? h('div', { style: { gridColumn: 'span 3' } }, [renderCajaChicaStatus(obraId, ccMov, rec)]) : null,
       buzonItem ? h('div', { style: { gridColumn: 'span 3' } }, [renderContadorStatus(buzonItem)]) : null,
@@ -489,7 +524,7 @@ function renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzo
 
 function renderCajaChicaStatus(obraId, ccMov, rec) {
   const m = ccMov.mov;
-  const totalRec = Number(rec.totalRecepcion) || 0;
+  const totalRec = computeRecepcionMontos(rec).total;   // total con IVA
   const needsUpdate = Math.abs(m.monto - totalRec) > 0.01 && m.estado !== 'aprobado';
   const badge = m.estado === 'reportado' ? h('span', { class: 'tag warn' }, '⏳ Reportado a caja chica')
     : m.estado === 'aprobado' ? h('span', { class: 'tag ok' }, '✓ Aprobado por contador')
@@ -595,10 +630,16 @@ async function onEnviarContador(obraId, recId, rec, conceptos) {
 
   const desglose = buildDesgloseFromRecepcion(rec, conceptos);
   const folio = `E-${String(rec.numero).padStart(4, '0')}`;
-  const subtotal = total; // suma de items, sin IVA
+  // subtotal / iva / total salen del modo IVA configurado en la recepción.
+  const montos = computeRecepcionMontos(rec);
+  const ivaModeTxt = ({
+    sin_iva: 'Sin IVA (exento)',
+    mas_iva: `Precio sin IVA + ${Math.round(montos.rate * 100)}% IVA`,
+    iva_incluido: `Precio con IVA incluido (${Math.round(montos.rate * 100)}%)`
+  })[montos.mode] || 'Sin IVA';
 
   // Forma de pago — le dice al contador si crea CxP (crédito) o si ya está pagado.
-  const formaSel = h('select', { value: rec.formaPago || 'credito' }, [
+  const formaSel = h('select', {}, [
     h('option', { value: 'credito' }, 'Crédito — se paga después (queda por pagar / CxP)'),
     h('option', { value: 'efectivo' }, 'Efectivo — ya pagado'),
     h('option', { value: 'transferencia' }, 'Transferencia — ya pagada'),
@@ -606,38 +647,14 @@ async function onEnviarContador(obraId, recId, rec, conceptos) {
   ]);
   formaSel.value = rec.formaPago || 'credito';
 
-  // Total de factura CON IVA (opcional). IVA = total − subtotal.
-  const facturaInput = h('input', {
-    type: 'number', step: '0.01', min: '0',
-    value: rec.facturaTotal ? String(rec.facturaTotal) : '',
-    placeholder: `Total con IVA (opcional) — subtotal ${money(subtotal)}`
-  });
-  const ivaVal = h('span', { class: 'mono', style: { fontSize: '12px' } }, money(0));
-  const totalVal = h('span', { class: 'mono' }, money(subtotal));
-  const warnEl = h('div', { class: 'tag warn', style: { display: 'none', marginTop: '6px', whiteSpace: 'normal' } },
-    'El total de factura es menor al subtotal; se ignora y se usa el subtotal.');
-  function recompute() {
-    const ft = Number(facturaInput.value) || 0;
-    const totalConIva = ft > subtotal ? ft : subtotal;
-    const iva = +(totalConIva - subtotal).toFixed(2);
-    ivaVal.textContent = money(iva);
-    totalVal.textContent = money(totalConIva);
-    warnEl.style.display = (ft > 0 && ft < subtotal) ? 'block' : 'none';
-  }
-  facturaInput.addEventListener('input', recompute);
-  recompute();
-
   await modal({
     title: 'Enviar recepción al contador',
     body: h('div', {}, [
       h('p', {}, [`Se enviará la recepción ${folio} al buzón del contador (bitácora) para que apruebe y registre el gasto.`]),
 
       h('div', { class: 'field', style: { marginBottom: '10px' } }, [h('label', {}, 'Forma de pago'), formaSel]),
-      h('div', { class: 'field', style: { marginBottom: '10px' } }, [
-        h('label', {}, 'Total de factura (con IVA)'), facturaInput, warnEl
-      ]),
 
-      // Desglose por concepto (sin IVA — suma == subtotal)
+      // Desglose por concepto (sin IVA — suma == subtotal) + IVA según modo de la recepción
       h('div', {
         style: { margin: '10px 0', padding: '10px 12px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '13px' }
       }, [
@@ -649,17 +666,17 @@ async function onEnviarContador(obraId, recId, rec, conceptos) {
           h('span', { class: 'mono', style: { fontSize: '12px' } }, money(d.monto))
         ])),
         h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '10px', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--border)' } }, [
-          h('span', { class: 'muted' }, 'Subtotal'), h('span', { class: 'mono', style: { fontSize: '12px' } }, money(subtotal))
+          h('span', { class: 'muted' }, 'Subtotal'), h('span', { class: 'mono', style: { fontSize: '12px' } }, money(montos.subtotal))
         ]),
         h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '10px' } }, [
-          h('span', { class: 'muted' }, 'IVA'), ivaVal
+          h('span', { class: 'muted' }, `IVA (${ivaModeTxt})`), h('span', { class: 'mono', style: { fontSize: '12px' } }, money(montos.iva))
         ]),
         h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '10px', marginTop: '4px', paddingTop: '4px', borderTop: '1px solid var(--border)', fontWeight: 600 } }, [
-          h('span', {}, 'Total'), totalVal
+          h('span', {}, 'Total'), h('span', { class: 'mono' }, money(montos.total))
         ])
       ]),
       h('p', { class: 'muted', style: { fontSize: '12px' } },
-        'Mientras esté con el contador no se puede editar. Si la rechaza, podrás reabrirla para corregir y reenviar.')
+        'El IVA se ajusta desde el campo "IVA" de la recepción. Mientras esté con el contador no se puede editar; si la rechaza, podrás reabrirla y reenviar.')
     ]),
     confirmLabel: '↗ Enviar al contador',
     onConfirm: async () => {
@@ -668,8 +685,7 @@ async function onEnviarContador(obraId, recId, rec, conceptos) {
         await enviarRecepcionABuzon(obraId, recId, {
           uid: u.uid, displayName: u.displayName || '', email: u.email || ''
         }, {
-          formaPago: formaSel.value,
-          facturaTotal: Number(facturaInput.value) || 0
+          formaPago: formaSel.value
         });
         toast('Recepción enviada al contador', 'ok');
         renderRecepcionDetalle({ params: { id: obraId, recid: recId } });

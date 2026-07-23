@@ -304,7 +304,9 @@ export async function deleteSalida(obraId, salId) {
 //     origenRef: { reqId? | ticketDescripcion? },
 //     proveedor, factura?,
 //     items: { [itemId]: { materialKey, cantidad, costoUnitario, conceptoKey? } },
-//     totalRecepcion, notas, recibidoPor,
+//     totalRecepcion,                  # BASE = suma de items (cantidad×costo)
+//     ivaMode: 'sin_iva'|'mas_iva'|'iva_incluido',  ivaRate (default 0.16),
+//     notas, recibidoPor,
 //     estado: 'borrador' | 'enviada_buzon' | 'cancelada',
 //     buzonId?, enviadaBuzonAt?,
 //     createdAt, updatedAt }
@@ -367,6 +369,57 @@ export async function setRecepcionEstado(obraId, recId, estado, extra = {}) {
   return rupdate(`obras/${obraId}/recepciones/${recId}`, { estado, ...extra, updatedAt: Date.now() });
 }
 
+// IVA de la recepción. `totalRecepcion` guarda la BASE = suma de items
+// (cantidad×costoUnitario). El `ivaMode` interpreta esa base para que el TOTAL
+// reportado al contador cuadre sin dividir a mano:
+//   'mas_iva'      → la base es SUBTOTAL; se SUMA IVA.  total = base×(1+rate).
+//   'iva_incluido' → la base ya es TOTAL con IVA; se EXTRAE.  subtotal = base/(1+rate).
+//   'sin_iva'      → exento.  subtotal = total = base, iva = 0.
+// Default 'sin_iva' (compat con recepciones viejas). rate default 0.16.
+export function computeRecepcionMontos(rec) {
+  const base = Number(rec?.totalRecepcion) || 0;
+  const mode = rec?.ivaMode || 'sin_iva';
+  const rate = Number.isFinite(Number(rec?.ivaRate)) ? Number(rec.ivaRate) : 0.16;
+  if (mode === 'mas_iva') {
+    const subtotal = +base.toFixed(2);
+    const iva = +(base * rate).toFixed(2);
+    return { base, mode, rate, subtotal, iva, total: +(subtotal + iva).toFixed(2) };
+  }
+  if (mode === 'iva_incluido') {
+    const total = +base.toFixed(2);
+    const subtotal = +(base / (1 + rate)).toFixed(2);
+    const iva = +(total - subtotal).toFixed(2);
+    return { base, mode, rate, subtotal, iva, total };
+  }
+  return { base, mode: 'sin_iva', rate, subtotal: +base.toFixed(2), iva: 0, total: +base.toFixed(2) };
+}
+
+// Desglose por concepto en términos de SUBTOTAL (sin IVA); suma == subtotal.
+// En 'iva_incluido' los importes de item ya traen IVA, así que se escalan
+// /(1+rate) para que el desglose_presupuesto quede sin IVA (el IVA es acreditable).
+export function buildDesgloseRecepcion(rec, conceptos) {
+  const mode = rec?.ivaMode || 'sin_iva';
+  const rate = Number.isFinite(Number(rec?.ivaRate)) ? Number(rec.ivaRate) : 0.16;
+  const factor = mode === 'iva_incluido' ? 1 / (1 + rate) : 1;
+  const acum = new Map();
+  for (const it of Object.values(rec?.items || {})) {
+    if (!it.materialKey || !it.conceptoKey) continue;
+    const importe = (Number(it.cantidad) || 0) * (Number(it.costoUnitario) || 0);
+    acum.set(it.conceptoKey, (acum.get(it.conceptoKey) || 0) + importe * factor);
+  }
+  const out = [];
+  for (const [ck, monto] of acum) {
+    const c = conceptos?.[ck];
+    out.push({
+      conceptoKey: ck,
+      conceptoClave: c?.clave || null,
+      conceptoDescripcion: c?.descripcion || null,
+      monto: +monto.toFixed(2)
+    });
+  }
+  return out;
+}
+
 // Envía una recepción de OC al buzón cross-app con tipo='gasto_oc' para que
 // bitácora (contador) la apruebe y asiente como gasto contable (categoría
 // Materiales) con desglose por concepto OPUS. Espejo de enviarRequisicionABuzon:
@@ -383,13 +436,13 @@ export async function setRecepcionEstado(obraId, recId, estado, extra = {}) {
 // importe sin concepto o el desglose no cuadraría con el subtotal).
 // Idempotente: si ya hay un buzonId activo (no rechazado/huerfano), no republica.
 //
+// El subtotal/iva/total salen del `ivaMode` de la recepción (ver
+// computeRecepcionMontos) — el almacenista lo configura al capturar, no aquí.
+//
 // opts:
 //   formaPago: 'credito' | 'efectivo' | 'transferencia' | 'caja_chica'
 //     Cómo se liquida el gasto — le dice a bitácora si crea CxP (crédito) o si
 //     ya está pagado (efectivo/transferencia/caja_chica). Default 'credito'.
-//   facturaTotal: number  Total de la factura CON IVA (opcional). El subtotal
-//     (sin IVA) es la suma de items; iva = facturaTotal − subtotal. Si no se
-//     captura, total = subtotal e iva = 0 (el contador ajusta al tener factura).
 export async function enviarRecepcionABuzon(obraId, recId, autor, opts = {}) {
   const rec = await rread(`obras/${obraId}/recepciones/${recId}`);
   if (!rec) throw new Error('Recepción no encontrada');
@@ -405,16 +458,12 @@ export async function enviarRecepcionABuzon(obraId, recId, autor, opts = {}) {
   const itemsRaw = Object.values(rec.items || {}).filter(it => it.materialKey);
   if (itemsRaw.length === 0) throw new Error('La recepción no tiene items');
 
-  const total = Number(rec.totalRecepcion) || 0;
-  if (total <= 0) throw new Error('La recepción no tiene importe (agrega costo a los items)');
+  if ((Number(rec.totalRecepcion) || 0) <= 0) throw new Error('La recepción no tiene importe (agrega costo a los items)');
 
-  // subtotal (sin IVA) = suma de items; total (con IVA) = factura capturada.
-  const subtotal = +total.toFixed(2);
+  // subtotal / iva / total según el modo de IVA de la recepción.
+  const { subtotal, iva, total: totalConIva } = computeRecepcionMontos(rec);
   const FORMAS_PAGO = ['credito', 'efectivo', 'transferencia', 'caja_chica'];
   const formaPago = FORMAS_PAGO.includes(opts.formaPago) ? opts.formaPago : 'credito';
-  const facturaTotal = Number(opts.facturaTotal) || 0;
-  const totalConIva = facturaTotal > subtotal ? +facturaTotal.toFixed(2) : subtotal;
-  const iva = +(totalConIva - subtotal).toFixed(2);
 
   // Todos los items deben tener concepto — el gasto se desglosa por concepto.
   const sinConcepto = itemsRaw.filter(it => !it.conceptoKey);
@@ -444,20 +493,8 @@ export async function enviarRecepcionABuzon(obraId, recId, autor, opts = {}) {
     };
   });
 
-  // Desglose por concepto (para desglose_presupuesto del gasto contable).
-  const acum = new Map();
-  for (const it of items) {
-    acum.set(it.conceptoKey, (acum.get(it.conceptoKey) || 0) + it.importe);
-  }
-  const desglose = [...acum].map(([ck, monto]) => {
-    const c = conceptos[ck];
-    return {
-      conceptoKey: ck,
-      conceptoClave: c?.clave || null,
-      conceptoDescripcion: c?.descripcion || null,
-      monto: +monto.toFixed(2)
-    };
-  });
+  // Desglose por concepto SIN IVA (suma == subtotal), consciente del modo IVA.
+  const desglose = buildDesgloseRecepcion(rec, conceptos);
 
   const folio = `E-${String(rec.numero || 0).padStart(4, '0')}`;
   const buzonItem = {
@@ -470,11 +507,11 @@ export async function enviarRecepcionABuzon(obraId, recId, autor, opts = {}) {
     origenTipo: 'oc',
     reqId: rec.origenRef?.reqId || null,
     formaPago,                              // credito | efectivo | transferencia | caja_chica
+    ivaMode: rec.ivaMode || 'sin_iva',      // mas_iva | iva_incluido | sin_iva
     monto: totalConIva,                     // total del gasto CON IVA (lo que registra el contador)
-    subtotal,                               // suma de items sin IVA (== sum(desglose.monto))
-    iva,                                    // facturaTotal − subtotal (0 si no se capturó factura)
+    subtotal,                               // sin IVA (== sum(desglose.monto))
+    iva,                                    // IVA calculado según ivaMode
     total: totalConIva,                     // alias explícito del total con IVA
-    facturaTotal: facturaTotal > 0 ? +facturaTotal.toFixed(2) : null,
     fecha: rec.fecha || Date.now(),
     comentario: `Recepción ${folio}` + (rec.proveedor ? ` · ${rec.proveedor}` : ''),
     proveedor: rec.proveedor || null,
@@ -490,8 +527,6 @@ export async function enviarRecepcionABuzon(obraId, recId, autor, opts = {}) {
     estado: 'enviada_buzon',
     buzonId,
     formaPago,
-    facturaTotal: facturaTotal > 0 ? +facturaTotal.toFixed(2) : null,
-    iva,
     enviadaBuzonAt: Date.now(),
     updatedAt: Date.now()
   });
