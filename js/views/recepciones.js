@@ -274,6 +274,10 @@ async function onReportarCajaChica(obraId, recId, rec) {
   const total = montos.total;   // total con IVA — lo que realmente salió de la caja
   if (total <= 0) { toast('Agrega items con costo primero', 'warn'); return; }
   const conceptos = state.conceptos || {};
+  // ¿De qué fondo de la caja chica salió el dinero? Transferencia (histórico)
+  // o efectivo (billete físico). Ver spec-caja-chica-fondo-efectivo.md.
+  const fondoTransfer = h('input', { type: 'radio', name: 'fondoCC', value: 'transferencia', checked: true });
+  const fondoEfectivo = h('input', { type: 'radio', name: 'fondoCC', value: 'efectivo' });
   await modal({
     title: 'Reportar a caja chica',
     body: h('div', {}, [
@@ -282,16 +286,26 @@ async function onReportarCajaChica(obraId, recId, rec) {
         h('b', {}, total.toLocaleString('es-MX', { style: 'currency', currency: 'MXN' })),
         ' en la caja chica de esta obra y se publicará al buzón cross-app.'
       ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, '¿De qué fondo se pagó?'),
+        h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [
+          fondoTransfer, h('span', {}, '🏦 Fondo transferencia (el de siempre)')
+        ]),
+        h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [
+          fondoEfectivo, h('span', {}, '💵 Fondo efectivo (billete del fondo de efectivo de la obra)')
+        ])
+      ]),
       h('p', { class: 'muted', style: { fontSize: '12px' } },
-        'El admin/contador lo verá pendiente desde caja chica o desde bitácora. Al aprobar se descuenta del saldo y se asienta como gasto contable.')
+        'El admin/contador lo verá pendiente desde caja chica o desde bitácora. Al aprobar se descuenta del saldo del fondo elegido y se asienta como gasto contable.')
     ]),
     confirmLabel: '📤 Reportar',
     onConfirm: async () => {
       const u = state.user;
+      const esEfectivo = fondoEfectivo.checked;
       const comentario = `Recepción E-${String(rec.numero).padStart(4, '0')}` + (rec.proveedor ? ` · ${rec.proveedor}` : '');
       const desglose = buildDesgloseFromRecepcion(rec, conceptos);
       // 1) Crear el movimiento en caja chica
-      const movId = await addMovimientoCajaChica(obraId, {
+      const mov = {
         tipo: 'gasto',
         estado: 'reportado',
         monto: total,
@@ -299,10 +313,12 @@ async function onReportarCajaChica(obraId, recId, rec) {
         comentario,
         autor: { uid: u.uid, displayName: u.displayName || '', email: u.email || '' },
         refRecepcionId: recId
-      });
+      };
+      if (esEfectivo) mov.fondo = 'efectivo';
+      const movId = await addMovimientoCajaChica(obraId, mov);
       // 2) Publicar al buzón cross-app
       try {
-        const buzonItemId = await pushBuzonItem({
+        const item = {
           tipo: 'gasto_caja_chica',
           origenApp: 'materiales',
           obraId,
@@ -320,13 +336,15 @@ async function onReportarCajaChica(obraId, recId, rec) {
           desglose,
           autor: { uid: u.uid, displayName: u.displayName || '', email: u.email || '' },
           estado: 'recibido'
-        });
+        };
+        if (esEfectivo) item.fondo = 'efectivo';
+        const buzonItemId = await pushBuzonItem(item);
         await updateMovimientoCajaChica(obraId, movId, { buzonItemId });
       } catch (e) {
         console.error('No se pudo publicar al buzón', e);
         toast('Reportado en caja chica, pero falló la publicación al buzón', 'warn');
       }
-      toast('Reportado a caja chica', 'ok');
+      toast('Reportado a caja chica' + (esEfectivo ? ' (fondo efectivo)' : ''), 'ok');
       renderRecepcionDetalle({ params: { id: obraId, recid: recId } });
       return true;
     }

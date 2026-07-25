@@ -691,13 +691,21 @@ export async function findMovimientoCajaChicaByRecepcion(obraId, recepcionId) {
 }
 // Cálculo del saldo + sumas auxiliares. Puro, testeable.
 //
+// DOS FONDOS POR OBRA (2026-07-25, ver appsogrub/docs/spec-caja-chica-fondo-efectivo.md):
+// cada movimiento pertenece a un fondo — `m.fondo` ausente = 'transferencia'
+// (todo lo histórico) o `m.fondo='efectivo'` (fondo de efectivo, billete físico
+// que sale de la caja física de SOGRUB al aprobarse). Cada fondo lleva su
+// propio saldo conciliado; esta función calcula el del fondo pedido.
+//
 // Reglas:
-//   - Saldo conciliado SOLO incluye depósitos `metodoDeposito='transferencia'`
-//     con `estado='aprobado'`. Solicitados (pendientes) y rechazados no
-//     afectan el saldo. Efectivo nunca afecta saldo (es informativo).
+//   - Fondo transferencia: saldo SOLO incluye depósitos
+//     `metodoDeposito='transferencia'` con `estado='aprobado'`. El depósito
+//     "efectivo" SIN fondo es informativo (legacy, nunca afecta saldo).
+//   - Fondo efectivo: TODO depósito del fondo (siempre es billete) cuenta al
+//     saldo cuando `estado='aprobado'`.
 //   - Backward compat: depósitos sin `estado` se asumen aprobados (legacy).
-//   - Gastos: solo aprobados restan al saldo.
-export function computeSaldoCajaChica(movimientos) {
+//   - Gastos: solo aprobados restan al saldo (del fondo al que pertenecen).
+export function computeSaldoCajaChica(movimientos, fondo = 'transferencia') {
   let saldo = 0;
   // Depósitos por estado/método
   let totalTransferAprobado = 0, totalTransferSolicitado = 0, totalTransferRechazado = 0;
@@ -709,11 +717,15 @@ export function computeSaldoCajaChica(movimientos) {
   let countGastoAprobado = 0, countGastoReportado = 0, countGastoRechazado = 0;
 
   for (const m of Object.values(movimientos || {})) {
+    if ((m.fondo === 'efectivo' ? 'efectivo' : 'transferencia') !== fondo) continue;
     const monto = Number(m.monto) || 0;
     if (m.tipo === 'deposito') {
       const metodo = m.metodoDeposito || 'transferencia';
       const estado = m.estado || 'aprobado';   // legacy default
-      if (metodo === 'transferencia') {
+      // En el fondo efectivo todo depósito cuenta al saldo (los buckets
+      // "Transfer" acumulan lo que cuenta; "Efectivo" queda solo para el
+      // informativo legacy del fondo transferencia).
+      if (fondo === 'efectivo' || metodo === 'transferencia') {
         if (estado === 'aprobado')   { saldo += monto; totalTransferAprobado   += monto; countTransferAprobado++; }
         else if (estado === 'solicitado') { totalTransferSolicitado += monto; countTransferSolicitado++; }
         else if (estado === 'rechazado')  { totalTransferRechazado  += monto; countTransferRechazado++; }
