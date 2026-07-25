@@ -324,6 +324,11 @@ export async function createRecepcion(obraId, recibidoPor, data = {}) {
     numero,
     fecha: Date.now(),
     origenTipo: data.origenTipo || 'oc',
+    // Solo para origenTipo='caja_chica': de qué fondo salió el dinero
+    // ('transferencia' | 'efectivo'). Se elige al crear y viaja hasta el
+    // movimiento de caja chica y el item de buzón al reportar.
+    // Ver appsogrub/docs/spec-caja-chica-fondo-efectivo.md.
+    fondoCaja: data.origenTipo === 'caja_chica' ? (data.fondoCaja || 'transferencia') : null,
     origenRef: data.origenRef || null,
     proveedor: data.proveedor || '',
     factura: data.factura || '',
@@ -464,6 +469,11 @@ export async function enviarRecepcionABuzon(obraId, recId, autor, opts = {}) {
   const { subtotal, iva, total: totalConIva } = computeRecepcionMontos(rec);
   const FORMAS_PAGO = ['credito', 'efectivo', 'transferencia', 'caja_chica'];
   const formaPago = FORMAS_PAGO.includes(opts.formaPago) ? opts.formaPago : 'credito';
+  // Si se pagó de caja chica, de qué fondo salió (spec-caja-chica-fondo-efectivo §3).
+  // Solo aplica a formaPago='caja_chica'; en cualquier otra forma no hay fondo.
+  const fondoCaja = formaPago === 'caja_chica'
+    ? (opts.fondoCaja === 'efectivo' ? 'efectivo' : 'transferencia')
+    : null;
 
   // Todos los items deben tener concepto — el gasto se desglosa por concepto.
   const sinConcepto = itemsRaw.filter(it => !it.conceptoKey);
@@ -522,11 +532,14 @@ export async function enviarRecepcionABuzon(obraId, recId, autor, opts = {}) {
     estado: 'recibido',
     creadoAt: Date.now()
   };
+  // Solo va al item si aplica: bitácora marca el contable con fondo_caja.
+  if (fondoCaja === 'efectivo') buzonItem.fondo = 'efectivo';
   const buzonId = await rpush('/shared/buzon', buzonItem);
   await rupdate(`obras/${obraId}/recepciones/${recId}`, {
     estado: 'enviada_buzon',
     buzonId,
     formaPago,
+    fondoCaja,
     enviadaBuzonAt: Date.now(),
     updatedAt: Date.now()
   });

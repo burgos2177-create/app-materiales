@@ -85,7 +85,7 @@ function recepcionRow(obraId, recId, r) {
   }, [
     h('td', { class: 'mono' }, `E-${String(r.numero || 0).padStart(4, '0')}`),
     h('td', {}, dateMx(r.fecha) || '—'),
-    h('td', {}, origenBadge(r.origenTipo)),
+    h('td', {}, [origenBadge(r.origenTipo), r.origenTipo === 'caja_chica' && ' ', fondoBadge(r)]),
     h('td', { class: 'muted' }, r.proveedor || '—'),
     h('td', { class: 'num' }, num0(itemsCount)),
     h('td', { class: 'num' }, money(computeRecepcionMontos(r).total)),
@@ -103,6 +103,26 @@ function origenBadge(tipo) {
   return h('span', { class: 'tag muted' }, tipo || '—');
 }
 
+// Fondo de caja chica del que salió el dinero. Sin valor = transferencia
+// (todo lo capturado antes del fondo efectivo).
+function fondoLabel(fondo) {
+  return fondo === 'efectivo' ? '💵 Fondo efectivo' : '🏦 Fondo transferencia';
+}
+
+function fondoBadge(rec) {
+  if (rec?.origenTipo !== 'caja_chica') return null;
+  const esEfectivo = rec.fondoCaja === 'efectivo';
+  return h('span', {
+    class: 'tag',
+    title: esEfectivo
+      ? 'Se pagó con billete del fondo de efectivo de la obra'
+      : 'Se pagó del fondo de caja chica que se repone por transferencia',
+    style: esEfectivo
+      ? { background: 'rgba(93,211,158,.15)', color: '#5dd39e' }
+      : { background: 'rgba(76,194,255,.12)', color: '#4cc2ff' }
+  }, fondoLabel(rec.fondoCaja));
+}
+
 function estadoBadge(estado) {
   if (estado === 'borrador') return h('span', { class: 'tag warn' }, '✎ Borrador');
   if (estado === 'enviada_buzon') return h('span', { class: 'tag ok' }, '↗ Enviada a contador');
@@ -116,6 +136,26 @@ async function onCreate(obraId) {
   const tipoCC = h('input', { type: 'radio', name: 'origen', value: 'caja_chica' });
   const proveedor = h('input', { placeholder: 'Proveedor (puedes editarlo después)' });
 
+  // Si es caja chica, ¿de cuál de los dos fondos salió? Se pregunta aquí para
+  // que quede sellado desde el arranque y viaje al buzón sin que el almacenista
+  // tenga que acordarse al reportar (ahí solo se confirma).
+  const fondoTransfer = h('input', { type: 'radio', name: 'fondoNuevaRec', value: 'transferencia', checked: true });
+  const fondoEfectivo = h('input', { type: 'radio', name: 'fondoNuevaRec', value: 'efectivo' });
+  const fondoBlock = h('div', { class: 'field', style: { display: 'none', marginLeft: '22px' } }, [
+    h('label', {}, '¿De qué fondo de la caja chica se pagó?'),
+    h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [
+      fondoTransfer, h('span', {}, '🏦 Fondo transferencia (el de siempre)')
+    ]),
+    h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [
+      fondoEfectivo, h('span', {}, '💵 Fondo efectivo (billete del fondo de efectivo de la obra)')
+    ]),
+    h('div', { class: 'muted', style: { fontSize: '12px' } },
+      'Define de qué saldo se descuenta al aprobar el gasto. Puedes cambiarlo después mientras la recepción siga en borrador.')
+  ]);
+  const syncFondoVisible = () => { fondoBlock.style.display = tipoCC.checked ? '' : 'none'; };
+  tipoOC.addEventListener('change', syncFondoVisible);
+  tipoCC.addEventListener('change', syncFondoVisible);
+
   await modal({
     title: 'Nueva recepción',
     body: h('div', {}, [
@@ -124,6 +164,7 @@ async function onCreate(obraId) {
         h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [tipoOC, h('span', {}, '📋 OC (con orden de compra de materiales)')]),
         h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [tipoCC, h('span', {}, '💵 Caja chica (compra en sitio)')])
       ]),
+      fondoBlock,
       h('div', { class: 'field' }, [h('label', {}, 'Proveedor'), proveedor])
     ]),
     confirmLabel: 'Crear',
@@ -134,6 +175,7 @@ async function onCreate(obraId) {
           { uid: u.uid, displayName: u.displayName || '', email: u.email || '' },
           {
             origenTipo: tipoOC.checked ? 'oc' : 'caja_chica',
+            fondoCaja: fondoEfectivo.checked ? 'efectivo' : 'transferencia',
             proveedor: proveedor.value.trim()
           });
         toast('Recepción creada', 'ok');
@@ -225,6 +267,7 @@ export async function renderRecepcionDetalle({ params }) {
   const head = h('div', { class: 'row' }, [
     h('h1', {}, [
       folio, ' ', estadoBadge(rec.estado), ' ', origenBadge(rec.origenTipo),
+      isCajaChica && ' ', isCajaChica && fondoBadge(rec),
       buzonItem && ' ', buzonItem && buzonGastoBadge(buzonItem.estado)
     ]),
     h('div', { style: { flex: 1 } }),
@@ -276,8 +319,11 @@ async function onReportarCajaChica(obraId, recId, rec) {
   const conceptos = state.conceptos || {};
   // ¿De qué fondo de la caja chica salió el dinero? Transferencia (histórico)
   // o efectivo (billete físico). Ver spec-caja-chica-fondo-efectivo.md.
-  const fondoTransfer = h('input', { type: 'radio', name: 'fondoCC', value: 'transferencia', checked: true });
-  const fondoEfectivo = h('input', { type: 'radio', name: 'fondoCC', value: 'efectivo' });
+  // Viene preseleccionado con lo elegido al crear la recepción; aquí solo se
+  // confirma (o se corrige de último momento).
+  const fondoActual = rec.fondoCaja === 'efectivo' ? 'efectivo' : 'transferencia';
+  const fondoTransfer = h('input', { type: 'radio', name: 'fondoCC', value: 'transferencia', checked: fondoActual !== 'efectivo' });
+  const fondoEfectivo = h('input', { type: 'radio', name: 'fondoCC', value: 'efectivo', checked: fondoActual === 'efectivo' });
   await modal({
     title: 'Reportar a caja chica',
     body: h('div', {}, [
@@ -287,7 +333,7 @@ async function onReportarCajaChica(obraId, recId, rec) {
         ' en la caja chica de esta obra y se publicará al buzón cross-app.'
       ]),
       h('div', { class: 'field' }, [
-        h('label', {}, '¿De qué fondo se pagó?'),
+        h('label', {}, `¿De qué fondo se pagó? (elegiste ${fondoLabel(fondoActual)} al crearla)`),
         h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [
           fondoTransfer, h('span', {}, '🏦 Fondo transferencia (el de siempre)')
         ]),
@@ -302,6 +348,13 @@ async function onReportarCajaChica(obraId, recId, rec) {
     onConfirm: async () => {
       const u = state.user;
       const esEfectivo = fondoEfectivo.checked;
+      // Si se corrigió el fondo aquí, que la recepción quede igual que lo
+      // reportado — es lo que se ve en el listado y en el detalle.
+      const fondoElegido = esEfectivo ? 'efectivo' : 'transferencia';
+      if (fondoElegido !== fondoActual) {
+        try { await updateRecepcion(obraId, recId, { fondoCaja: fondoElegido }); }
+        catch (e) { console.error('No se pudo guardar el fondo en la recepción', e); }
+      }
       const comentario = `Recepción E-${String(rec.numero).padStart(4, '0')}` + (rec.proveedor ? ` · ${rec.proveedor}` : '');
       const desglose = buildDesgloseFromRecepcion(rec, conceptos);
       // 1) Crear el movimiento en caja chica
@@ -464,6 +517,29 @@ function renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzo
   ];
 
   if (rec.origenTipo === 'caja_chica') {
+    // Fondo del que salió el dinero. Se puede corregir mientras la recepción
+    // siga en borrador y NO se haya reportado: una vez creado el movimiento en
+    // caja chica, el fondo ya está sellado ahí y en el item del buzón.
+    const fondoEditable = editable && !ccMov;
+    const fondoSel = h('select', { disabled: !fondoEditable }, [
+      h('option', { value: 'transferencia', selected: rec.fondoCaja !== 'efectivo' }, '🏦 Fondo transferencia (el de siempre)'),
+      h('option', { value: 'efectivo', selected: rec.fondoCaja === 'efectivo' }, '💵 Fondo efectivo (billete del fondo de la obra)')
+    ]);
+    fondoSel.value = rec.fondoCaja === 'efectivo' ? 'efectivo' : 'transferencia';
+    fondoSel.addEventListener('change', async () => {
+      await updateRecepcion(obraId, recId, { fondoCaja: fondoSel.value });
+      toast(`Fondo: ${fondoLabel(fondoSel.value)}`, 'ok');
+      renderRecepcionDetalle({ params: { id: obraId, recid: recId } });
+    });
+    vinculoCards.push(h('div', { class: 'field', style: { gridColumn: 'span 3' } }, [
+      h('label', {}, 'Fondo de caja chica'),
+      fondoSel,
+      h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '4px' } },
+        ccMov
+          ? 'Ya reportado: el fondo quedó sellado en el movimiento de caja chica y en el buzón.'
+          : 'De este saldo se descuenta el gasto cuando el contador lo apruebe.')
+    ]));
+
     const ticketDescInput = h('input', {
       value: rec.origenRef?.ticketDescripcion || '', disabled: !editable,
       placeholder: 'Descripción del ticket / referencia (foto se subirá próximamente)'
@@ -665,12 +741,28 @@ async function onEnviarContador(obraId, recId, rec, conceptos) {
   ]);
   formaSel.value = rec.formaPago || 'credito';
 
+  // Si se pagó de caja chica, hay que decir de cuál de los dos fondos salió:
+  // es lo que define qué saldo baja del lado del contador.
+  const fondoOCSel = h('select', {}, [
+    h('option', { value: 'transferencia' }, '🏦 Fondo transferencia (el de siempre)'),
+    h('option', { value: 'efectivo' }, '💵 Fondo efectivo (billete del fondo de la obra)')
+  ]);
+  fondoOCSel.value = rec.fondoCaja === 'efectivo' ? 'efectivo' : 'transferencia';
+  const fondoOCField = h('div', { class: 'field', style: { marginBottom: '10px', display: 'none' } }, [
+    h('label', {}, '¿De qué fondo de la caja chica se pagó?'),
+    fondoOCSel
+  ]);
+  const syncFondoOC = () => { fondoOCField.style.display = formaSel.value === 'caja_chica' ? '' : 'none'; };
+  formaSel.addEventListener('change', syncFondoOC);
+  setTimeout(syncFondoOC, 0);
+
   await modal({
     title: 'Enviar recepción al contador',
     body: h('div', {}, [
       h('p', {}, [`Se enviará la recepción ${folio} al buzón del contador (bitácora) para que apruebe y registre el gasto.`]),
 
       h('div', { class: 'field', style: { marginBottom: '10px' } }, [h('label', {}, 'Forma de pago'), formaSel]),
+      fondoOCField,
 
       // Desglose por concepto (sin IVA — suma == subtotal) + IVA según modo de la recepción
       h('div', {
@@ -703,7 +795,8 @@ async function onEnviarContador(obraId, recId, rec, conceptos) {
         await enviarRecepcionABuzon(obraId, recId, {
           uid: u.uid, displayName: u.displayName || '', email: u.email || ''
         }, {
-          formaPago: formaSel.value
+          formaPago: formaSel.value,
+          fondoCaja: fondoOCSel.value
         });
         toast('Recepción enviada al contador', 'ok');
         renderRecepcionDetalle({ params: { id: obraId, recid: recId } });
