@@ -28,6 +28,11 @@ import { money, dateMx, num0 } from '../util/format.js';
 
 const DEFAULT_UMBRAL = 1000;
 
+// Fondo activo por obra (UI). 'transferencia' (default) o 'efectivo'.
+// Ver appsogrub/docs/spec-caja-chica-fondo-efectivo.md.
+const _fondoActivo = new Map();
+const fondoDeMov = (m) => (m?.fondo === 'efectivo' ? 'efectivo' : 'transferencia');
+
 export async function renderCajaChica({ params }) {
   const obraId = params.id;
   setState({ obraActual: obraId });
@@ -40,7 +45,10 @@ export async function renderCajaChica({ params }) {
     listRecepciones(obraId)
   ]);
 
-  const sums = computeSaldoCajaChica(movimientos);
+  const fondo = _fondoActivo.get(obraId) || 'transferencia';
+  const esEfectivo = fondo === 'efectivo';
+  const sums = computeSaldoCajaChica(movimientos, fondo);
+  const sumsOtro = computeSaldoCajaChica(movimientos, esEfectivo ? 'transferencia' : 'efectivo');
   const umbral = (ccMeta?.umbralAlerta ?? DEFAULT_UMBRAL);
   const isAdmin = state.user?.role === 'admin';
   const lowBalance = sums.saldo < umbral && sums.saldo > 0;
@@ -64,7 +72,7 @@ export async function renderCajaChica({ params }) {
     h('div', {
       style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '14px', marginTop: '20px', textAlign: 'left' }
     }, [
-      kpiCell('Transferencia aprobada', money(sums.totalTransferAprobado),
+      kpiCell(esEfectivo ? 'Depósito efectivo aprobado' : 'Transferencia aprobada', money(sums.totalTransferAprobado),
         `${num0(sums.countTransferAprobado)} ✓ · afecta saldo`),
       kpiCell('Gastado aprobado', money(sums.totalGastadoAprobado),
         `${num0(sums.countGastoAprobado)} ✓ · descuenta saldo`),
@@ -85,18 +93,33 @@ export async function renderCajaChica({ params }) {
     ])
   ]);
 
+  // ============ Selector de fondo ============
+  // Dos fondos conviven por obra: 🏦 transferencia (histórico) y 💵 efectivo
+  // (billete físico; al aprobar el depósito, el contador lo saca de la caja
+  // física de SOGRUB). Cada fondo lleva su propio saldo conciliado.
+  const fondoPill = (f, label, saldoStr) => h('button', {
+    class: 'btn' + (f === fondo ? ' primary' : ''),
+    style: f === fondo ? {} : { opacity: '.75' },
+    onClick: () => { _fondoActivo.set(obraId, f); renderCajaChica({ params: { id: obraId } }); }
+  }, label + (saldoStr ? ` · ${saldoStr}` : ''));
+  const fondoRow = h('div', { class: 'row', style: { gap: '8px', margin: '10px 0' } }, [
+    fondoPill('transferencia', '🏦 Fondo transferencia', esEfectivo ? money(sumsOtro.saldo) : ''),
+    fondoPill('efectivo', '💵 Fondo efectivo', esEfectivo ? '' : money(sumsOtro.saldo))
+  ]);
+
   // ============ Acciones ============
   // Desde esta app SOLO se solicita y se reporta. La aprobación es del contador
   // en bitácora — por eso no hay botones Aprobar/Rechazar aquí.
   const actionRow = h('div', { class: 'row' }, [
     h('h2', {}, 'Movimientos'),
     h('div', { style: { flex: 1 } }),
-    h('button', { class: 'btn primary', onClick: () => onSolicitarDeposito(obraId) }, '+ Solicitar depósito'),
+    h('button', { class: 'btn primary', onClick: () => onSolicitarDeposito(obraId, fondo) },
+      esEfectivo ? '+ Solicitar depósito en efectivo' : '+ Solicitar depósito'),
     isAdmin && h('button', { class: 'btn', onClick: () => onUmbral(obraId, umbral) }, '⚙ Umbral de alerta')
   ]);
 
-  // ============ Tabla de movimientos ============
-  const ids = Object.keys(movimientos);
+  // ============ Tabla de movimientos (solo el fondo activo) ============
+  const ids = Object.keys(movimientos).filter(id => fondoDeMov(movimientos[id]) === fondo);
   ids.sort((a, b) => (movimientos[b].fecha || movimientos[b].createdAt || 0) - (movimientos[a].fecha || movimientos[a].createdAt || 0));
 
   let table;
@@ -128,6 +151,11 @@ export async function renderCajaChica({ params }) {
 
   renderShell(crumbs(obraId, meta?.nombre), h('div', {}, [
     h('h1', {}, 'Caja Chica'),
+    fondoRow,
+    esEfectivo
+      ? h('div', { class: 'muted', style: { fontSize: '11px', marginBottom: '10px' } },
+          '💵 Fondo de efectivo: los depósitos son billete físico que el contador saca de la caja de SOGRUB al aprobar. Sí afectan el saldo de este fondo.')
+      : null,
     saldoCard,
     actionRow,
     table
@@ -152,11 +180,15 @@ function movRow(obraId, movId, m, recepciones, isAdmin) {
   const isRechazado = estado === 'rechazado';
   const isPending = estado === 'solicitado' || estado === 'reportado';
 
-  // Tipo con método si es depósito
+  const esFondoEfectivo = m.fondo === 'efectivo';
+
+  // Tipo con método/fondo si es depósito
   const tipoCell = !isDeposito
     ? h('span', { class: 'tag', style: { background: 'rgba(255,107,107,.15)', color: 'var(--danger)' } }, '⬇ Gasto')
-    : metodo === 'efectivo'
-      ? h('span', { class: 'tag', style: { background: 'var(--bg-3)', color: 'var(--text-1)' } }, '⬆ Depósito · 💵 Efectivo')
+    : esFondoEfectivo
+      ? h('span', { class: 'tag', style: { background: 'rgba(240,180,80,.18)', color: 'var(--warn)' } }, '⬆ Depósito · 💵 Fondo efectivo')
+      : metodo === 'efectivo'
+      ? h('span', { class: 'tag', style: { background: 'var(--bg-3)', color: 'var(--text-1)' } }, '⬆ Depósito · 💵 Efectivo (informativo)')
       : h('span', { class: 'tag', style: { background: 'rgba(93,211,158,.18)', color: 'var(--ok)' } }, '⬆ Depósito · 🏦 Transferencia');
 
   const buzonBadge = m.buzonItemId
@@ -172,12 +204,14 @@ function movRow(obraId, movId, m, recepciones, isAdmin) {
       : estado === 'rechazado' ? h('span', {}, [h('span', { class: 'tag danger' }, '✕ Rechazado'), buzonBadge])
       : h('span', { class: 'muted' }, estado));
 
-  // Color del monto: solo lo que ya afecta saldo se ve fuerte
-  const afectaSaldo = (isDeposito && isAprobado && metodo === 'transferencia') || (isGasto && isAprobado);
-  const montoColor = isDeposito && isAprobado && metodo === 'transferencia' ? 'var(--ok)'
+  // Color del monto: solo lo que ya afecta saldo se ve fuerte. En el fondo
+  // efectivo todo depósito aprobado cuenta; en transferencia solo el bancario.
+  const depCuenta = isDeposito && isAprobado && (esFondoEfectivo || metodo === 'transferencia');
+  const afectaSaldo = depCuenta || (isGasto && isAprobado);
+  const montoColor = depCuenta ? 'var(--ok)'
     : isGasto && isAprobado ? 'var(--danger)'
     : 'var(--text-1)';
-  const montoSign = isDeposito && isAprobado && metodo === 'transferencia' ? '+'
+  const montoSign = depCuenta ? '+'
     : isGasto && isAprobado ? '−' : '';
 
   const recepcion = m.refRecepcionId ? recepciones[m.refRecepcionId] : null;
@@ -230,9 +264,12 @@ function movRow(obraId, movId, m, recepciones, isAdmin) {
 // =================== Acciones del admin ===================
 
 // Crea una SOLICITUD de depósito (no aplica todavía al saldo). El contador
-// la apruebay/rechaza desde bitácora; al aprobarla, el sync cross-app
+// la aprueba/rechaza desde bitácora; al aprobarla, el sync cross-app
 // actualiza el estado de este movimiento a 'aprobado' y el saldo se recalcula.
-async function onSolicitarDeposito(obraId) {
+// En el fondo EFECTIVO el depósito siempre es billete físico y SÍ afecta el
+// saldo del fondo al aprobarse (el contador lo saca de la caja física SOGRUB).
+async function onSolicitarDeposito(obraId, fondo = 'transferencia') {
+  const esEfectivo = fondo === 'efectivo';
   const monto = h('input', { type: 'number', step: '0.01', min: '0.01', placeholder: '0.00', autofocus: true });
   const fecha = h('input', { type: 'date', value: toDateInputVal(Date.now()) });
   const comentario = h('input', { placeholder: 'p.ej. depósito mensual, fondo inicial, recarga urgente…' });
@@ -243,30 +280,34 @@ async function onSolicitarDeposito(obraId) {
       h('div', { class: 'field' }, [h('label', {}, 'Monto *'), monto]),
       h('div', { class: 'field' }, [h('label', {}, 'Fecha'), fecha])
     ]),
-    h('div', { class: 'field' }, [
-      h('label', {}, 'Método solicitado'),
-      h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [
-        metodoTransfer, h('span', {}, '🏦 Transferencia bancaria — al aprobar el contador, sumará al saldo conciliado y se asentará como movimiento bancario en bitácora.')
-      ]),
-      h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [
-        metodoEfectivo, h('span', {}, '💵 Efectivo — al aprobar el contador, queda como registro histórico. NO afecta saldo conciliado (ese efectivo ya se contabilizó al retirarlo del banco).')
-      ])
-    ]),
+    esEfectivo
+      ? h('div', { class: 'muted', style: { fontSize: '12px', lineHeight: 1.5 } },
+          '💵 Depósito al FONDO EFECTIVO: billete físico. Al aprobar, el contador lo saca de la caja física de SOGRUB y SÍ suma al saldo conciliado de este fondo.')
+      : h('div', { class: 'field' }, [
+          h('label', {}, 'Método solicitado'),
+          h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [
+            metodoTransfer, h('span', {}, '🏦 Transferencia bancaria — al aprobar el contador, sumará al saldo conciliado y se asentará como movimiento bancario en bitácora.')
+          ]),
+          h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [
+            metodoEfectivo, h('span', {}, '💵 Efectivo — al aprobar el contador, queda como registro histórico. NO afecta saldo conciliado (ese efectivo ya se contabilizó al retirarlo del banco).')
+          ])
+        ]),
     h('div', { class: 'field' }, [h('label', {}, 'Comentario'), comentario]),
     h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '6px' } },
       'Esto crea una SOLICITUD pendiente de aprobación. El saldo de caja chica solo cambia cuando el contador aprueba desde bitácora.')
   ]);
 
   await modal({
-    title: 'Solicitar depósito a caja chica', body, confirmLabel: 'Solicitar',
+    title: esEfectivo ? '💵 Solicitar depósito · fondo efectivo' : 'Solicitar depósito a caja chica',
+    body, confirmLabel: 'Solicitar',
     onConfirm: async () => {
       const m = Number(monto.value);
       if (!m || m <= 0) { toast('Monto inválido', 'danger'); return false; }
       try {
         const u = state.user;
-        const metodoDeposito = metodoEfectivo.checked ? 'efectivo' : 'transferencia';
+        const metodoDeposito = (esEfectivo || metodoEfectivo.checked) ? 'efectivo' : 'transferencia';
         const fechaMs = fecha.value ? new Date(fecha.value + 'T12:00').getTime() : Date.now();
-        const movId = await addMovimientoCajaChica(obraId, {
+        const mov = {
           tipo: 'deposito',
           estado: 'solicitado',
           metodoDeposito,
@@ -274,12 +315,15 @@ async function onSolicitarDeposito(obraId) {
           fecha: fechaMs,
           comentario: comentario.value.trim() || null,
           autor: { uid: u.uid, displayName: u.displayName || '', email: u.email || '' }
-        });
+        };
+        if (esEfectivo) mov.fondo = 'efectivo';
+        const movId = await addMovimientoCajaChica(obraId, mov);
         // Tanto transferencia como efectivo van al buzón — ambos requieren
         // confirmación del contador (aunque solo transferencia aprobada
-        // afecte el saldo).
+        // afecte el saldo del fondo transferencia; en el fondo efectivo el
+        // depósito aprobado SÍ afecta y bitácora lo asienta contra su caja física).
         try {
-          const buzonItemId = await pushBuzonItem({
+          const item = {
             tipo: 'deposito_caja_chica',
             origenApp: 'materiales',
             obraId,
@@ -290,13 +334,15 @@ async function onSolicitarDeposito(obraId) {
             comentario: comentario.value.trim() || null,
             autor: { uid: u.uid, displayName: u.displayName || '', email: u.email || '' },
             estado: 'recibido'
-          });
+          };
+          if (esEfectivo) item.fondo = 'efectivo';
+          const buzonItemId = await pushBuzonItem(item);
           await updateMovimientoCajaChica(obraId, movId, { buzonItemId });
         } catch (e) {
           console.error('No se pudo publicar al buzón', e);
           toast('Solicitud creada, pero falló la publicación al buzón', 'warn');
         }
-        toast(`Depósito solicitado: ${money(m)} (${metodoDeposito})`, 'ok');
+        toast(`Depósito solicitado: ${money(m)} (${esEfectivo ? 'fondo efectivo' : metodoDeposito})`, 'ok');
         renderCajaChica({ params: { id: obraId } });
         return true;
       } catch (err) { toast('Error: ' + err.message, 'danger'); return false; }

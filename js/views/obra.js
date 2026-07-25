@@ -27,7 +27,8 @@ export async function renderObra({ params }) {
     listMovimientosCajaChica(obraId),
     getCajaChicaMeta(obraId)
   ]);
-  const ccSums = computeSaldoCajaChica(ccMovs);
+  const ccSums = computeSaldoCajaChica(ccMovs);                 // fondo transferencia
+  const ccSumsEf = computeSaldoCajaChica(ccMovs, 'efectivo');   // fondo efectivo
   const ccUmbral = ccMeta?.umbralAlerta ?? 1000;
   const ccLow = ccSums.saldo < ccUmbral && ccSums.totalDepositado > 0;
 
@@ -143,9 +144,13 @@ export async function renderObra({ params }) {
           }
         }, money(ccSums.saldo))
       ]),
-      ccSums.totalReportadoPendiente > 0 && h('div', {}, [
+      (ccSumsEf.saldo !== 0 || ccSumsEf.totalDepositado > 0 || ccSumsEf.totalReportadoPendiente > 0) && h('div', {}, [
+        h('div', { class: 'muted', style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.4px' } }, '💵 Fondo efectivo'),
+        h('div', { style: { fontSize: '14px', marginTop: '2px', color: ccSumsEf.saldo < 0 ? 'var(--danger)' : 'var(--text-1)' } }, money(ccSumsEf.saldo))
+      ]),
+      (ccSums.totalReportadoPendiente + ccSumsEf.totalReportadoPendiente) > 0 && h('div', {}, [
         h('div', { class: 'muted', style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.4px' } }, 'Reportado pendiente'),
-        h('div', { style: { fontSize: '14px', marginTop: '2px', color: 'var(--accent)' } }, money(ccSums.totalReportadoPendiente))
+        h('div', { style: { fontSize: '14px', marginTop: '2px', color: 'var(--accent)' } }, money(ccSums.totalReportadoPendiente + ccSumsEf.totalReportadoPendiente))
       ]),
       ccLow && h('div', { class: 'tag warn' }, `⚠ saldo bajo (umbral ${money(ccUmbral)})`),
       ccSums.saldo <= 0 && ccSums.totalDepositado > 0 && h('div', { class: 'tag danger' }, '🔴 saldo agotado')
