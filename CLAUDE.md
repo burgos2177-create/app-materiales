@@ -4,6 +4,12 @@ App web para el almacenista de obra. Sister app de **app-estimaciones** (ingenie
 
 ## Stack
 - Vanilla JS (módulos ES nativos), HTML, CSS — sin frameworks ni bundler
+- **Cache-busting: `bash bump-cache.sh` antes de cada push que toque `js/` o `css/`.**
+  Regenera el `<script type="importmap">` de `index.html` con una URL `?v=` por
+  módulo. Es obligatorio: `index.html` solo versionaba `main.js`, y como sus 26
+  imports estáticos se pedían sin query, GitHub Pages y el navegador seguían
+  sirviendo los viejos — deploys a medias, con `main.js` nuevo llamando módulos
+  viejos (fue exactamente lo que pasó el 2026-07-25 con el selector de fondo).
 - Firebase Realtime Database + Auth (proyecto `sogrub-suite`, compartido con las hermanas)
 - SheetJS (CDN) para parsear el XLS de materiales exportado de OPUS
 

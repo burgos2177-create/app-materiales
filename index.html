@@ -10,17 +10,51 @@
   <title>Materiales SGR</title>
   <link rel="icon" href="assets/logo-64.png" />
   <link rel="apple-touch-icon" href="assets/logo-192.png" />
-  <link rel="stylesheet" href="css/main.css" />
-  <link rel="stylesheet" href="css/mobile.css" />
+  <link rel="stylesheet" href="css/main.css?v=20260725-2213" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260725-2213" />
   <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 </head>
 <body>
   <div id="app"></div>
   <div id="modal-root"></div>
   <div id="toast-root"></div>
-  <script type="module">
-    const v = Date.now();
-    import('./js/main.js?v=' + v);
+  <!-- IMPORTMAP-AUTO:start · generado por bump-cache.sh — no editar a mano -->
+  <script type="importmap">
+  {
+    "imports": {
+      "./js/config/firebase-config.js": "./js/config/firebase-config.js?v=20260725-2213",
+      "./js/main.js": "./js/main.js?v=20260725-2213",
+      "./js/services/auth.js": "./js/services/auth.js?v=20260725-2213",
+      "./js/services/db.js": "./js/services/db.js?v=20260725-2213",
+      "./js/services/firebase.js": "./js/services/firebase.js?v=20260725-2213",
+      "./js/services/material-keys.js": "./js/services/material-keys.js?v=20260725-2213",
+      "./js/services/opus-materiales-exporter.js": "./js/services/opus-materiales-exporter.js?v=20260725-2213",
+      "./js/services/opus-materiales-parser.js": "./js/services/opus-materiales-parser.js?v=20260725-2213",
+      "./js/services/origen.js": "./js/services/origen.js?v=20260725-2213",
+      "./js/services/stock.js": "./js/services/stock.js?v=20260725-2213",
+      "./js/state/router.js": "./js/state/router.js?v=20260725-2213",
+      "./js/state/store.js": "./js/state/store.js?v=20260725-2213",
+      "./js/util/dom.js": "./js/util/dom.js?v=20260725-2213",
+      "./js/util/format.js": "./js/util/format.js?v=20260725-2213",
+      "./js/views/_dialogs.js": "./js/views/_dialogs.js?v=20260725-2213",
+      "./js/views/admin.js": "./js/views/admin.js?v=20260725-2213",
+      "./js/views/caja-chica.js": "./js/views/caja-chica.js?v=20260725-2213",
+      "./js/views/catalogo.js": "./js/views/catalogo.js?v=20260725-2213",
+      "./js/views/dashboard.js": "./js/views/dashboard.js?v=20260725-2213",
+      "./js/views/login.js": "./js/views/login.js?v=20260725-2213",
+      "./js/views/obra.js": "./js/views/obra.js?v=20260725-2213",
+      "./js/views/obras.js": "./js/views/obras.js?v=20260725-2213",
+      "./js/views/recepciones.js": "./js/views/recepciones.js?v=20260725-2213",
+      "./js/views/requisicion.js": "./js/views/requisicion.js?v=20260725-2213",
+      "./js/views/requisiciones.js": "./js/views/requisiciones.js?v=20260725-2213",
+      "./js/views/salidas.js": "./js/views/salidas.js?v=20260725-2213",
+      "./js/views/shell.js": "./js/views/shell.js?v=20260725-2213"
+    }
+  }
   </script>
+  <script type="module">
+    import('./js/main.js?v=20260725-2213');
+  </script>
+  <!-- IMPORTMAP-AUTO:end -->
 </body>
 </html>
