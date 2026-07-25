@@ -6,7 +6,7 @@ import {
   loadCatalogoMateriales, loadCatalogoConceptos,
   addRequisicionItem, updateRequisicionItem, removeRequisicionItem,
   setRequisicionEstado, addRequisicionItemsBatch,
-  enviarRequisicionABuzon,
+  enviarRequisicionABuzon, updateBuzonItem,
   listRequisiciones, listRecepciones, listSalidas
 } from '../services/db.js';
 import { computeStockByMaterial } from '../services/stock.js';
@@ -71,11 +71,11 @@ export async function renderRequisicionDetalle({ params }) {
       class: 'btn ghost',
       onClick: () => onCancelar(obraId, reqId)
     }, 'Cancelar'),
-    // Reabrir solo si no hay buzón activo (legacy, o el item del buzón fue
-    // rechazado/huérfano y se quiere editar para reenviar).
-    !editable && req.estado === 'enviada' && !buzonActivo && h('button', {
+    // Reabrir: vuelve a borrador para editar/reenviar. Si el buzón sigue activo
+    // (p.ej. "Cotizando" pero la OC se canceló en compras), la retira de compras.
+    !editable && req.estado === 'enviada' && h('button', {
       class: 'btn ghost',
-      onClick: () => onReabrir(obraId, reqId)
+      onClick: () => onReabrir(obraId, reqId, req, buzonItem)
     }, '↺ Reabrir')
   ]);
 
@@ -299,12 +299,33 @@ async function onCancelar(obraId, reqId) {
   });
 }
 
-async function onReabrir(obraId, reqId) {
+async function onReabrir(obraId, reqId, req, buzonItem) {
+  const buzonActivo = buzonItem && !['rechazado', 'huerfano'].includes(buzonItem.estado);
   await modal({
     title: 'Reabrir requisición',
-    body: h('div', {}, 'Se vuelve a estado borrador para editar items.'),
-    confirmLabel: 'Reabrir',
+    body: buzonActivo
+      ? h('div', {}, [
+          h('p', {}, [
+            'Esta requisición sigue con compras (', buzonBadge(buzonItem.estado),
+            '). Reabrirla la ', h('b', {}, 'retira de compras'), ' y vuelve a borrador para que edites y reenvíes.'
+          ]),
+          h('p', { class: 'muted', style: { fontSize: '12px' } },
+            'Úsalo si la OC se canceló o si faltó agregar material. Al reenviar se genera un envío nuevo a compras.')
+        ])
+      : h('div', {}, 'Se vuelve a estado borrador para editar items.'),
+    confirmLabel: buzonActivo ? 'Retirar de compras y reabrir' : 'Reabrir',
+    danger: !!buzonActivo,
     onConfirm: async () => {
+      // Si el buzón sigue activo, lo marcamos huérfano para que compras lo ignore
+      // y para permitir el reenvío (enviarRequisicionABuzon rechaza si hay buzón activo).
+      if (buzonActivo && req?.buzonId) {
+        try {
+          await updateBuzonItem(req.buzonId, {
+            estado: 'huerfano',
+            motivoHuerfano: 'Reabierta por el almacenista para editar y reenviar'
+          });
+        } catch (e) { console.error('No se pudo retirar de compras', e); }
+      }
       await setRequisicionEstado(obraId, reqId, 'borrador');
       toast('Requisición reabierta', 'ok');
       renderRequisicionDetalle({ params: { id: obraId, reqid: reqId } });
