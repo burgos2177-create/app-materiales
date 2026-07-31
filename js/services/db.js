@@ -297,13 +297,15 @@ export async function deleteSalida(obraId, salId) {
   return rremove(`obras/${obraId}/salidas/${salId}`);
 }
 
-// === Proveedores (registro global compartido, homologación cross-app) ===
+// === Proveedores (lista compartida HOMOLOGADA con bitácora) ===
 //
-// Lista única en `/shared/proveedores/{provId}` para que todas las apps de la
-// suite (materiales, bitácora, compras) seleccionen del mismo catálogo y no se
-// dupliquen variantes ("DAVID MAQUINISTA" / "MAQUINISTA DAVID" / "David Máquinas").
-// PROVEEDORES_PATH es el único punto a cambiar si bitácora ya usa otro nodo.
-export const PROVEEDORES_PATH = '/shared/proveedores';
+// Fuente única: el MISMO nodo que ya usa bitácora (appsogrub), en la base de
+// datos compartida `sogrub-suite`. Es un ARREGLO de { id, nombre, rfc?, telefono?,
+// email?, notas? } — id = crypto.randomUUID() (igual que bitácora), y bitácora
+// liga los gastos por `nombre`. Al seleccionar de aquí no se duplican variantes
+// ("DAVID MAQUINISTA" / "MAQUINISTA DAVID" / "David Máquinas").
+// PROVEEDORES_PATH es el único punto a cambiar si bitácora mueve el nodo.
+export const PROVEEDORES_PATH = '/legacy/bitacora/sogrub_proveedores';
 
 // Normaliza para comparar/deduplicar: minúsculas, sin acentos, espacios colapsados.
 // (No reordena palabras; el reorden se evita SELECCIONANDO de la lista, no tecleando.)
@@ -313,29 +315,41 @@ export function normalizeProveedor(nombre) {
     .replace(/\s+/g, ' ');
 }
 
-export async function listProveedores() {
-  return (await rread(PROVEEDORES_PATH)) || {};
+// Lee el arreglo crudo (bitácora lo guarda como array; Firebase puede devolverlo
+// como array o como objeto con claves numéricas).
+async function _readProveedoresArray() {
+  const raw = await rread(PROVEEDORES_PATH);
+  if (Array.isArray(raw)) return raw.filter(Boolean);
+  if (raw && typeof raw === 'object') return Object.values(raw).filter(Boolean);
+  return [];
 }
 
-// Crea el proveedor o devuelve el existente si ya hay uno con el mismo nombre
-// normalizado. Idempotente. Devuelve { id, nombre, existed }.
+// Devuelve un mapa { [id]: proveedor } para el selector.
+export async function listProveedores() {
+  const arr = await _readProveedoresArray();
+  const map = {};
+  for (const p of arr) if (p && p.id) map[p.id] = p;
+  return map;
+}
+
+// Crea el proveedor en el nodo de bitácora, o devuelve el existente si ya hay uno
+// con el mismo nombre normalizado. Idempotente. Devuelve { id, nombre, existed }.
+// Preserva el formato de bitácora (arreglo, id=UUID) para que su UI lo vea igual.
 export async function createProveedor(nombre, autor) {
   const clean = (nombre || '').toString().trim();
   if (!clean) throw new Error('Nombre de proveedor vacío');
   const norm = normalizeProveedor(clean);
-  const all = await listProveedores();
-  for (const [id, p] of Object.entries(all)) {
-    if ((p.nombreNorm || normalizeProveedor(p.nombre)) === norm) {
-      return { id, nombre: p.nombre, existed: true };
-    }
-  }
-  const id = await rpush(PROVEEDORES_PATH, {
-    nombre: clean,
-    nombreNorm: norm,
-    createdAt: Date.now(),
-    createdBy: autor ? { uid: autor.uid, displayName: autor.displayName || '' } : null,
-    origenApp: 'materiales'
-  });
+  const arr = await _readProveedoresArray();
+  const existing = arr.find(p => p && normalizeProveedor(p.nombre) === norm);
+  if (existing) return { id: existing.id, nombre: existing.nombre, existed: true };
+
+  const id = (globalThis.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `prov_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const nuevo = { id, nombre: clean, origenApp: 'materiales', createdAt: Date.now() };
+  if (autor) nuevo.createdBy = { uid: autor.uid, displayName: autor.displayName || '' };
+  arr.push(nuevo);
+  await rset(PROVEEDORES_PATH, arr);   // set del arreglo completo (mismo patrón que bitácora)
   return { id, nombre: clean, existed: false };
 }
 

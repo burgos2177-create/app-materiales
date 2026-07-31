@@ -210,13 +210,14 @@ Publicado al **solicitar** un depósito (cualquier método). El depósito nace e
 /shared/catalogos/{obraId}/conceptos/{conceptoKey}: ...   # solo lectura
 /shared/buzon/{itemId}: { tipo, origenApp: 'materiales', ... }
 
-/shared/proveedores/{provId}:                            # registro GLOBAL homologado
-  nombre, nombreNorm,                                    # nombreNorm = normalizeProveedor(nombre)
-  createdAt, createdBy: { uid, displayName }, origenApp   # lo comparten materiales/bitácora/compras
-  # Fuente única de proveedores. La recepción guarda proveedorId + proveedor (snapshot).
-  # createProveedor() deduplica por nombreNorm (minúsculas/sin acentos/espacios) — el
-  # reorden de palabras se evita SELECCIONANDO de la lista, no tecleando. Path en la
-  # constante PROVEEDORES_PATH (db.js). Si bitácora ya usa otro nodo, cambiar ahí.
+/legacy/bitacora/sogrub_proveedores:                     # HOMOLOGADO con bitácora
+  [ { id, nombre, rfc?, telefono?, email?, notas? }, ... ]   # ARREGLO, id = crypto.randomUUID()
+  # Fuente ÚNICA de proveedores: el mismo nodo que ya usa bitácora (appsogrub) en la
+  # DB compartida sogrub-suite. Esta app lee/escribe ahí directo (no duplica lista).
+  # La recepción guarda proveedorId (= id de bitácora) + proveedor (snapshot del nombre;
+  # bitácora liga los gastos por nombre). createProveedor() deduplica por nombre
+  # normalizado (minúsculas/sin acentos/espacios) y hace set del arreglo completo,
+  # mismo patrón que el addItem de bitácora. Path en la constante PROVEEDORES_PATH (db.js).
 
 /shared/cajaChica/{obraId}/
   meta: { umbralAlerta, createdAt, updatedAt }
