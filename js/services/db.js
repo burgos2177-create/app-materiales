@@ -297,6 +297,48 @@ export async function deleteSalida(obraId, salId) {
   return rremove(`obras/${obraId}/salidas/${salId}`);
 }
 
+// === Proveedores (registro global compartido, homologación cross-app) ===
+//
+// Lista única en `/shared/proveedores/{provId}` para que todas las apps de la
+// suite (materiales, bitácora, compras) seleccionen del mismo catálogo y no se
+// dupliquen variantes ("DAVID MAQUINISTA" / "MAQUINISTA DAVID" / "David Máquinas").
+// PROVEEDORES_PATH es el único punto a cambiar si bitácora ya usa otro nodo.
+export const PROVEEDORES_PATH = '/shared/proveedores';
+
+// Normaliza para comparar/deduplicar: minúsculas, sin acentos, espacios colapsados.
+// (No reordena palabras; el reorden se evita SELECCIONANDO de la lista, no tecleando.)
+export function normalizeProveedor(nombre) {
+  return (nombre || '').toString().trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+export async function listProveedores() {
+  return (await rread(PROVEEDORES_PATH)) || {};
+}
+
+// Crea el proveedor o devuelve el existente si ya hay uno con el mismo nombre
+// normalizado. Idempotente. Devuelve { id, nombre, existed }.
+export async function createProveedor(nombre, autor) {
+  const clean = (nombre || '').toString().trim();
+  if (!clean) throw new Error('Nombre de proveedor vacío');
+  const norm = normalizeProveedor(clean);
+  const all = await listProveedores();
+  for (const [id, p] of Object.entries(all)) {
+    if ((p.nombreNorm || normalizeProveedor(p.nombre)) === norm) {
+      return { id, nombre: p.nombre, existed: true };
+    }
+  }
+  const id = await rpush(PROVEEDORES_PATH, {
+    nombre: clean,
+    nombreNorm: norm,
+    createdAt: Date.now(),
+    createdBy: autor ? { uid: autor.uid, displayName: autor.displayName || '' } : null,
+    origenApp: 'materiales'
+  });
+  return { id, nombre: clean, existed: false };
+}
+
 // === Recepciones ===
 //
 // Modelo:
@@ -331,6 +373,7 @@ export async function createRecepcion(obraId, recibidoPor, data = {}) {
     fondoCaja: data.origenTipo === 'caja_chica' ? (data.fondoCaja || 'transferencia') : null,
     origenRef: data.origenRef || null,
     proveedor: data.proveedor || '',
+    proveedorId: data.proveedorId || null,
     factura: data.factura || '',
     items: {},
     totalRecepcion: 0,
@@ -525,6 +568,7 @@ export async function enviarRecepcionABuzon(obraId, recId, autor, opts = {}) {
     fecha: rec.fecha || Date.now(),
     comentario: `Recepción ${folio}` + (rec.proveedor ? ` · ${rec.proveedor}` : ''),
     proveedor: rec.proveedor || null,
+    proveedorId: rec.proveedorId || null,   // homologación con el registro compartido
     factura: rec.factura || null,
     desglose,                               // por concepto, SIN IVA (suma == subtotal)
     items,

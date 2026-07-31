@@ -21,11 +21,91 @@ import {
   updateMovimientoCajaChica, deleteMovimientoCajaChica,
   pushBuzonItem, updateBuzonItem, deleteBuzonItem,
   getBuzonItem, enviarRecepcionABuzon,
-  computeRecepcionMontos, buildDesgloseRecepcion as buildDesgloseFromRecepcion
+  computeRecepcionMontos, buildDesgloseRecepcion as buildDesgloseFromRecepcion,
+  listProveedores, createProveedor, normalizeProveedor
 } from '../services/db.js';
 import { navigate } from '../state/router.js';
 import { num, num0, money, dateMx } from '../util/format.js';
 import { materialItemDialog } from './_dialogs.js';
+
+// =================== Proveedores (selector homologado) ===================
+
+// Modal chico para capturar el nombre de un proveedor nuevo. Resuelve al nombre
+// o a null si se cancela.
+function promptProveedorNombre(initial = '') {
+  return new Promise(resolve => {
+    const input = h('input', { value: initial, placeholder: 'Nombre del proveedor' });
+    let done = false;
+    modal({
+      title: 'Agregar proveedor',
+      body: h('div', { class: 'field' }, [
+        h('label', {}, 'Nombre'),
+        input,
+        h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '6px' } },
+          'Se agrega a la lista compartida (homologada con bitácora). Revisa que no exista ya con otro orden de palabras antes de crearlo.')
+      ]),
+      confirmLabel: 'Agregar',
+      onConfirm: () => {
+        const v = input.value.trim();
+        if (!v) { toast('Escribe un nombre', 'warn'); return false; }
+        done = true; resolve(v); return true;
+      }
+    }).then(() => { if (!done) resolve(null); });
+    setTimeout(() => input.focus(), 30);
+  });
+}
+
+// Select de proveedor conectado al registro compartido /shared/proveedores.
+// Preserva un valor legacy (texto libre viejo) como opción "(sin registrar)" para
+// no perderlo, y ofrece "➕ Agregar nuevo…". Llama onPick({proveedor, proveedorId}).
+function proveedorSelect({ proveedores, currentId = null, currentNombre = '', disabled = false, onPick }) {
+  const sel = h('select', { disabled });
+  let curId = currentId, curNombre = currentNombre || '';
+  function build() {
+    sel.innerHTML = '';
+    sel.appendChild(h('option', { value: '' }, '— Selecciona proveedor —'));
+    const entries = Object.entries(proveedores)
+      .sort((a, b) => (a[1].nombre || '').localeCompare(b[1].nombre || '', 'es'));
+    for (const [id, p] of entries) sel.appendChild(h('option', { value: id }, p.nombre));
+    let selId = curId && proveedores[curId] ? curId : '';
+    if (!selId && curNombre) {
+      const norm = normalizeProveedor(curNombre);
+      const match = entries.find(([, p]) => (p.nombreNorm || normalizeProveedor(p.nombre)) === norm);
+      if (match) selId = match[0];
+    }
+    if (!selId && curNombre) {
+      sel.appendChild(h('option', { value: '__legacy__' }, `${curNombre} (sin registrar)`));
+      selId = '__legacy__';
+    }
+    sel.appendChild(h('option', { value: '__nuevo__' }, '➕ Agregar nuevo…'));
+    sel.value = selId;
+  }
+  build();
+  sel.addEventListener('change', async () => {
+    const v = sel.value;
+    if (v === '__nuevo__') {
+      const nombre = await promptProveedorNombre();
+      if (!nombre) { build(); return; }
+      try {
+        const { id, nombre: n, existed } = await createProveedor(nombre, state.user);
+        proveedores[id] = { nombre: n, nombreNorm: normalizeProveedor(n) };
+        curId = id; curNombre = n; build();
+        onPick({ proveedor: n, proveedorId: id });
+        toast(existed ? 'Ese proveedor ya existía — se seleccionó' : 'Proveedor agregado', 'ok');
+      } catch (e) { toast('Error: ' + e.message, 'danger'); build(); }
+    } else if (v === '__legacy__') {
+      onPick({ proveedor: curNombre, proveedorId: null });
+    } else if (v === '') {
+      curId = null; curNombre = '';
+      onPick({ proveedor: '', proveedorId: null });
+    } else {
+      const p = proveedores[v];
+      curId = v; curNombre = p?.nombre || '';
+      onPick({ proveedor: curNombre, proveedorId: v });
+    }
+  });
+  return sel;
+}
 
 // =================== Lista ===================
 
@@ -134,7 +214,12 @@ async function onCreate(obraId) {
   // Modal pequeño con tipo origen — luego abrimos el detalle para los items.
   const tipoOC = h('input', { type: 'radio', name: 'origen', value: 'oc', checked: true });
   const tipoCC = h('input', { type: 'radio', name: 'origen', value: 'caja_chica' });
-  const proveedor = h('input', { placeholder: 'Proveedor (puedes editarlo después)' });
+  const proveedores = await listProveedores();
+  const picked = { proveedor: '', proveedorId: null };
+  const proveedorSel = proveedorSelect({
+    proveedores,
+    onPick: (v) => { picked.proveedor = v.proveedor; picked.proveedorId = v.proveedorId; }
+  });
 
   // Si es caja chica, ¿de cuál de los dos fondos salió? Se pregunta aquí para
   // que quede sellado desde el arranque y viaje al buzón sin que el almacenista
@@ -165,7 +250,7 @@ async function onCreate(obraId) {
         h('label', { class: 'row', style: { padding: '4px 0', gap: '6px', cursor: 'pointer' } }, [tipoCC, h('span', {}, '💵 Caja chica (compra en sitio)')])
       ]),
       fondoBlock,
-      h('div', { class: 'field' }, [h('label', {}, 'Proveedor'), proveedor])
+      h('div', { class: 'field' }, [h('label', {}, 'Proveedor'), proveedorSel])
     ]),
     confirmLabel: 'Crear',
     onConfirm: async () => {
@@ -176,7 +261,8 @@ async function onCreate(obraId) {
           {
             origenTipo: tipoOC.checked ? 'oc' : 'caja_chica',
             fondoCaja: fondoEfectivo.checked ? 'efectivo' : 'transferencia',
-            proveedor: proveedor.value.trim()
+            proveedor: picked.proveedor,
+            proveedorId: picked.proveedorId
           });
         toast('Recepción creada', 'ok');
         navigate(`/obras/${obraId}/recepciones/${id}`);
@@ -234,13 +320,14 @@ export async function renderRecepcionDetalle({ params }) {
   setState({ obraActual: obraId });
   renderShell(crumbs(obraId, '...', null), h('div', { class: 'empty' }, 'Cargando…'));
 
-  const [meta, rec, catMat, catCon, requisiciones, ccMov] = await Promise.all([
+  const [meta, rec, catMat, catCon, requisiciones, ccMov, proveedores] = await Promise.all([
     getObraMetaLegacy(obraId),
     getRecepcion(obraId, recId),
     loadCatalogoMateriales(obraId),
     loadCatalogoConceptos(obraId),
     listRequisiciones(obraId),
-    findMovimientoCajaChicaByRecepcion(obraId, recId)
+    findMovimientoCajaChicaByRecepcion(obraId, recId),
+    listProveedores()
   ]);
   if (!rec) {
     renderShell(crumbs(obraId, meta?.nombre, null), h('div', { class: 'empty' }, 'Recepción no encontrada.'));
@@ -303,7 +390,7 @@ export async function renderRecepcionDetalle({ params }) {
     }, '↺ Reabrir')
   ]);
 
-  const metaCard = renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzonItem);
+  const metaCard = renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzonItem, proveedores);
   const itemsCard = renderItemsCard(obraId, recId, rec, materiales, conceptos, editable);
 
   renderShell(crumbs(obraId, meta?.nombre, folio), h('div', {}, [head, metaCard, itemsCard]));
@@ -385,6 +472,7 @@ async function onReportarCajaChica(obraId, recId, rec) {
           fecha: rec.fecha || Date.now(),
           comentario,
           proveedor: rec.proveedor || null,
+          proveedorId: rec.proveedorId || null,
           factura: rec.factura || null,
           desglose,
           autor: { uid: u.uid, displayName: u.displayName || '', email: u.email || '' },
@@ -443,6 +531,7 @@ async function onActualizarCajaChica(obraId, recId, rec, ccMov) {
             comentario,
             desglose,
             proveedor: rec.proveedor || null,
+            proveedorId: rec.proveedorId || null,
             factura: rec.factura || null
           });
         } catch (e) { console.error('No se pudo sincronizar buzón', e); }
@@ -454,7 +543,7 @@ async function onActualizarCajaChica(obraId, recId, rec, ccMov) {
   });
 }
 
-function renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzonItem) {
+function renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzonItem, proveedores = {}) {
   const fechaInput = h('input', { type: 'date', value: toDateInputVal(rec.fecha), disabled: !editable });
   fechaInput.addEventListener('change', async () => {
     const ms = fechaInput.value ? new Date(fechaInput.value + 'T12:00').getTime() : Date.now();
@@ -462,10 +551,15 @@ function renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzo
     toast('Fecha actualizada', 'ok');
   });
 
-  const proveedorInput = h('input', { value: rec.proveedor || '', disabled: !editable, placeholder: 'Proveedor' });
-  proveedorInput.addEventListener('change', async () => {
-    await updateRecepcion(obraId, recId, { proveedor: proveedorInput.value.trim() });
-    toast('Proveedor actualizado', 'ok');
+  const proveedorSel = proveedorSelect({
+    proveedores,
+    currentId: rec.proveedorId || null,
+    currentNombre: rec.proveedor || '',
+    disabled: !editable,
+    onPick: async (v) => {
+      await updateRecepcion(obraId, recId, { proveedor: v.proveedor, proveedorId: v.proveedorId });
+      toast('Proveedor actualizado', 'ok');
+    }
   });
 
   const facturaInput = h('input', { value: rec.factura || '', disabled: !editable, placeholder: 'Folio de factura (opcional)' });
@@ -604,7 +698,7 @@ function renderMetaCard(obraId, recId, rec, requisiciones, editable, ccMov, buzo
       kv('Folio', `E-${String(rec.numero || 0).padStart(4, '0')}`),
       h('div', { class: 'field' }, [h('label', {}, 'Fecha'), fechaInput]),
       kv('Total a reportar', money(montos.total)),
-      h('div', { class: 'field' }, [h('label', {}, 'Proveedor'), proveedorInput]),
+      h('div', { class: 'field' }, [h('label', {}, 'Proveedor'), proveedorSel]),
       h('div', { class: 'field' }, [h('label', {}, 'Factura'), facturaInput]),
       kv('Recibido por', rec.recibidoPor?.displayName || rec.recibidoPor?.email || '—'),
       ivaBlock,

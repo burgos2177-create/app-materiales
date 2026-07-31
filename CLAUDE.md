@@ -176,7 +176,9 @@ Publicado al **solicitar** un depósito (cualquier método). El depósito nace e
                               # null cuando no aplica. Viaja al movimiento de caja chica y
                               # al item del buzón (campo `fondo`) al reportar/enviar.
   origenRef,                  # reqId si oc, ticketUrl si caja_chica
-  proveedor, factura?,
+  proveedor,                  # nombre (snapshot) del proveedor seleccionado
+  proveedorId,                # id en /shared/proveedores (registro global homologado)
+  factura?,
   totalRecepcion,             # BASE = suma de items (cantidad×costo)
   ivaMode: 'sin_iva' | 'mas_iva' | 'iva_incluido',   # default 'sin_iva'
   ivaRate,                    # default 0.16. subtotal/iva/total se derivan (ver computeRecepcionMontos)
@@ -207,6 +209,14 @@ Publicado al **solicitar** un depósito (cualquier método). El depósito nace e
 ```
 /shared/catalogos/{obraId}/conceptos/{conceptoKey}: ...   # solo lectura
 /shared/buzon/{itemId}: { tipo, origenApp: 'materiales', ... }
+
+/shared/proveedores/{provId}:                            # registro GLOBAL homologado
+  nombre, nombreNorm,                                    # nombreNorm = normalizeProveedor(nombre)
+  createdAt, createdBy: { uid, displayName }, origenApp   # lo comparten materiales/bitácora/compras
+  # Fuente única de proveedores. La recepción guarda proveedorId + proveedor (snapshot).
+  # createProveedor() deduplica por nombreNorm (minúsculas/sin acentos/espacios) — el
+  # reorden de palabras se evita SELECCIONANDO de la lista, no tecleando. Path en la
+  # constante PROVEEDORES_PATH (db.js). Si bitácora ya usa otro nodo, cambiar ahí.
 
 /shared/cajaChica/{obraId}/
   meta: { umbralAlerta, createdAt, updatedAt }
