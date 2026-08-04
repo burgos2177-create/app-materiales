@@ -36,6 +36,14 @@ App web para el almacenista de obra. Sister app de **app-estimaciones** (ingenie
 11. **Edición de familia/marca/proveedor desde la app (catálogo)**: el almacenista o admin puede editar `familia`, `subfamilia`, `marca` y `proveedor` de cualquier material clickeando la celda "Familia / Marca" en `/obras/{id}/catalogo`. Se escribe en `/shared/materiales/{obraId}/catalogo/items/{materialKey}` directo — como `app-compras` lee del mismo path, ve el cambio sin sync extra. Cada campo editado deja un flag en `manualOverrides: { familia: true, ... }`. En el re-import del XLS de OPUS, `saveCatalogoMateriales` respeta esos overrides aunque OPUS traiga otro valor, hasta que el round-trip cierre (exportar XLS desde aquí → cargarlo en OPUS → siguiente export de OPUS ya trae el valor correcto, y el override coincide con el valor → no se nota). El exporter ya escribe Familia/Subfamilia/Marca/Proveedor en las 12 columnas estándar, así que OPUS lo absorbe al re-importar el XLS exportado.
 12b. **Dos fondos por obra (2026-07-25)**: cada movimiento de `/shared/cajaChica` pertenece a un fondo — `fondo` ausente = **transferencia** (histórico) o `fondo:'efectivo'` = **fondo de efectivo** (billete físico). `computeSaldoCajaChica(movimientos, fondo)` calcula el saldo del fondo pedido; la vista tiene pills 🏦/💵. En el fondo efectivo TODO depósito aprobado cuenta al saldo (el contador lo saca de la caja física de SOGRUB al aprobar, no de Mifel) y el depósito SÍ pasa por el buzón (`deposito_caja_chica` con `fondo:'efectivo'`). El fondo se pregunta **al crear la recepción** (modal "Nueva recepción" → origen Caja chica → 🏦/💵) y queda en `fondoCaja`; el modal de "Reportar a caja chica" solo lo confirma (se puede corregir ahí o desde el detalle mientras siga en borrador y sin reportar). De ahí viaja al movimiento y al item del buzón (`gasto_caja_chica` con `fondo:'efectivo'` si aplica). Una recepción de **OC** con `formaPago='caja_chica'` también pregunta el fondo al enviarla al contador (`gasto_oc` con `fondo:'efectivo'`). El depósito "efectivo" sin `fondo` sigue siendo informativo (legacy). Contrato completo: `appsogrub/docs/spec-caja-chica-fondo-efectivo.md`.
 
+13. **Herramienta y equipo (2026-08-04)**: módulo de inventario que vive **antes de obras** (`/herramientas`), porque la herramienta es de SOGRUB y **rota entre obras** — no pertenece a ninguna. Dentro de cada obra hay una vista espejo (`/obras/{id}/herramientas`) con "lo que está aquí". Vive en `/shared/herramientas/*` (suite-level, no bajo `/shared/materiales`).
+    - **Dos modos de control** (`tipoControl`): `unitario` = un registro es UNA pieza física con folio `HE-0001`, número de serie, foto e historial propio (rotomartillo, revolvedora, nivel láser); `cantidad` = un registro es un TIPO con existencias repartidas (20 palas, 15 cubetas). El tipo no se cambia después del alta.
+    - **La ubicación NO es un campo**: cada movimiento declara `origen` y `destino` y dónde está cada pieza se **deriva sumando el ledger** (`computeEstadoHerramientas`). Así nunca hay drift entre "dónde dice que está" y el historial. Ubicaciones: `__almacen__`, `obra:{obraId}`, `__externo__` (alta/baja/pérdida/venta).
+    - **El motivo se deriva de origen→destino** (almacén→obra = asignación, obra→almacén = devolución, obra→obra = traspaso, →externo = baja o pérdida). El almacenista solo piensa "de dónde a dónde".
+    - **Resguardo**: el `responsable` viaja con el destino del movimiento (quien recibe, resguarda). El estado derivado expone `responsables: Map(ubicación → {nombre, desde})`. Cambiarlo sin mover la herramienta genera un movimiento `motivo:'resguardo'` con `origen===destino` y `cantidad:0` — no afecta existencias pero queda en el historial. Igual para `motivo:'estado'` (daño/mantenimiento).
+    - **Sin buzón contable por ahora**: el módulo es inventario y control físico. Si la herramienta se compró con OC o caja chica, ese gasto ya se reporta por Recepciones. Vincular alta ↔ gasto queda como futuro (requiere lado bitácora).
+    - Proveedor usa la misma lista homologada (`/legacy/bitacora/sogrub_proveedores`) que las recepciones.
+
 12. **Caja chica por obra**: módulo en `/shared/cajaChica/{obraId}/` (compartido con `appsogrub`). Movimientos: `tipo: 'deposito' | 'gasto'`. Ambos tienen `estado: 'solicitado' | 'reportado' | 'aprobado' | 'rechazado'` (depósitos usan `solicitado`/`aprobado`/`rechazado`; gastos usan `reportado`/`aprobado`/`rechazado`). Depósitos llevan también `metodoDeposito: 'transferencia' | 'efectivo'`. Esta app **solo solicita y reporta**: la autoridad de aprobación vive solo en bitácora — desde aquí no hay botones Aprobar/Rechazar/Reabrir. Saldo conciliado = sum(depósitos transferencia con estado=aprobado) − sum(gastos con estado=aprobado). Efectivo nunca afecta saldo; los pendientes (solicitado/reportado) tampoco — solo se ven en KPI "Pendiente de aprobación". Flujo: almacenista/admin **solicita depósito** (transferencia o efectivo) → publica al buzón con tipo `deposito_caja_chica` → contador aprueba o rechaza en bitácora → cross-app sync actualiza el estado y el saldo se recalcula en ambas apps. Almacenista crea recepción tipo `caja_chica` y la "reporta" → publica al buzón con tipo `gasto_caja_chica` → mismo flujo de aprobación. Si saldo cae bajo el `umbralAlerta` (default $1,000, configurable), aparece alerta visual con leyenda "solicita depósito al contador". Backward compat: depósitos viejos sin `estado` se asumen aprobados.
 
 ## Routing cross-app
@@ -210,6 +218,26 @@ Publicado al **solicitar** un depósito (cualquier método). El depósito nace e
 /shared/catalogos/{obraId}/conceptos/{conceptoKey}: ...   # solo lectura
 /shared/buzon/{itemId}: { tipo, origenApp: 'materiales', ... }
 
+/shared/herramientas/catalogo/{hid}:                     # inventario global de herramienta
+  numero,                       # folio legible: HE-0001
+  nombre, descripcion, categoria, marca, modelo,
+  tipoControl: 'unitario' | 'cantidad',
+  unidad,                       # solo 'cantidad'
+  numeroSerie,                  # solo 'unitario'
+  estado: 'nuevo'|'bueno'|'regular'|'malo'|'reparacion'|'baja',
+  fotoUrl, costo, fechaCompra, proveedor, proveedorId, factura,
+  ultimoMantenimiento, notas, archivado,
+  createdAt, createdBy, updatedAt
+  # NO tiene campo de ubicación: se deriva del ledger de abajo.
+
+/shared/herramientas/movimientos/{movId}:                # ledger; la ubicación se deriva de aquí
+  herramientaKey,               # → catalogo/{hid}
+  motivo: 'alta'|'asignacion'|'devolucion'|'traspaso'|'baja'|'perdida'|'ajuste'|'resguardo'|'estado',
+  origen, destino,              # '__almacen__' | 'obra:{obraId}' | '__externo__'
+  cantidad,                     # 0 en 'resguardo'/'estado' (no mueven existencia)
+  fecha, responsable, notas,
+  autor: { uid, displayName, email }, createdAt
+
 /legacy/bitacora/sogrub_proveedores:                     # HOMOLOGADO con bitácora
   [ { id, nombre, rfc?, telefono?, email?, notas? }, ... ]   # ARREGLO, id = crypto.randomUUID()
   # Fuente ÚNICA de proveedores: el mismo nodo que ya usa bitácora (appsogrub) en la
@@ -244,6 +272,7 @@ js/
     db.js                        # paths absolutos /shared/* y /legacy/*
     opus-materiales-parser.js    # XLS → catálogo + resolución conceptosDirectos
     material-keys.js             # computeMaterialKey
+    herramientas.js              # inventario de herramienta: ledger + derivación de ubicación
   state/store.js, router.js
   util/dom.js, format.js
   views/
@@ -252,6 +281,9 @@ js/
     catalogo.js,                 # listado del catálogo de materiales
     salidas.js,                  # capturar salida + cargo a concepto
     requisiciones.js, recepciones.js   # stubs v1
+    herramientas.js,             # inventario global (antes de obras) + ficha
+    herramientas-obra.js,        # vista espejo: herramienta que está en la obra
+    _herramientas-dialogs.js     # alta/edición, mover, resguardo, estado, picker
 ```
 
 ## Cómo arrancar

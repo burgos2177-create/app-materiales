@@ -12,10 +12,14 @@ import { renderRequisicionesList } from './views/requisiciones.js';
 import { renderRequisicionDetalle } from './views/requisicion.js';
 import { renderRecepcionesList, renderRecepcionDetalle } from './views/recepciones.js';
 import { renderSalidasList, renderSalidaDetalle } from './views/salidas.js';
+import { renderHerramientas, renderHerramientaDetalle } from './views/herramientas.js';
+import { renderHerramientasObra } from './views/herramientas-obra.js';
 import { h, mount } from './util/dom.js';
 
 route('/',                                  () => renderObrasList());
 route('/admin',                             () => renderAdmin());
+route('/herramientas',                      () => renderHerramientas());
+route('/herramientas/:hid',                 renderHerramientaDetalle);
 route('/obras/:id',                         renderObra);
 route('/obras/:id/catalogo',                renderCatalogo);
 route('/obras/:id/dashboard',               renderDashboard);
@@ -24,6 +28,7 @@ route('/obras/:id/requisiciones',           renderRequisicionesList);
 route('/obras/:id/requisiciones/:reqid',    renderRequisicionDetalle);
 route('/obras/:id/recepciones',             renderRecepcionesList);
 route('/obras/:id/recepciones/:recid',      renderRecepcionDetalle);
+route('/obras/:id/herramientas',            renderHerramientasObra);
 route('/obras/:id/salidas',                 renderSalidasList);
 route('/obras/:id/salidas/:salid',          renderSalidaDetalle);
 

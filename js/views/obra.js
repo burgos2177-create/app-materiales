@@ -6,6 +6,10 @@ import {
   listRequisiciones, listRecepciones, listSalidas,
   listMovimientosCajaChica, getCajaChicaMeta, computeSaldoCajaChica
 } from '../services/db.js';
+import {
+  listHerramientas, listMovimientosHerramientas, computeEstadoHerramientas,
+  resumenInventario, herramientasEnObra, ubicObra
+} from '../services/herramientas.js';
 import { parseMaterialesXLS, buildCatalogoFromXLS } from '../services/opus-materiales-parser.js';
 import { isAdHoc } from '../services/origen.js';
 import { downloadCatalogoXLSX, buildConceptosResueltos } from '../services/opus-materiales-exporter.js';
@@ -17,7 +21,7 @@ export async function renderObra({ params }) {
   setState({ obraActual: obraId });
   renderShell(crumbs(obraId, '...'), h('div', { class: 'empty' }, 'Cargando obra…'));
 
-  const [meta, catMat, catCon, requisiciones, recepciones, salidas, ccMovs, ccMeta] = await Promise.all([
+  const [meta, catMat, catCon, requisiciones, recepciones, salidas, ccMovs, ccMeta, herrCat, herrMovs] = await Promise.all([
     getObraMetaLegacy(obraId),
     loadCatalogoMateriales(obraId),
     loadCatalogoConceptos(obraId),
@@ -25,7 +29,9 @@ export async function renderObra({ params }) {
     listRecepciones(obraId),
     listSalidas(obraId),
     listMovimientosCajaChica(obraId),
-    getCajaChicaMeta(obraId)
+    getCajaChicaMeta(obraId),
+    listHerramientas().catch(() => ({})),
+    listMovimientosHerramientas().catch(() => ({}))
   ]);
   const ccSums = computeSaldoCajaChica(ccMovs);                 // fondo transferencia
   const ccSumsEf = computeSaldoCajaChica(ccMovs, 'efectivo');   // fondo efectivo
@@ -124,8 +130,41 @@ export async function renderObra({ params }) {
       h('button', { class: 'btn', onClick: () => navigate(`/obras/${obraId}/dashboard`) }, '📊 Dashboard'),
       h('button', { class: 'btn', onClick: () => navigate(`/obras/${obraId}/requisiciones`) }, 'Requisiciones'),
       h('button', { class: 'btn', onClick: () => navigate(`/obras/${obraId}/recepciones`) }, 'Recepciones'),
-      h('button', { class: 'btn', onClick: () => navigate(`/obras/${obraId}/salidas`) }, 'Salidas')
+      h('button', { class: 'btn', onClick: () => navigate(`/obras/${obraId}/salidas`) }, 'Salidas'),
+      h('button', { class: 'btn', onClick: () => navigate(`/obras/${obraId}/herramientas`) }, '🔧 Herramienta')
     ])
+  ]);
+
+  // ============ Herramienta y equipo en esta obra ============
+  // El inventario es global (/shared/herramientas): aquí se ve el corte de lo
+  // que está físicamente en esta obra, derivado del mismo ledger.
+  const herrEstados = computeEstadoHerramientas(herrCat, herrMovs);
+  const herrAqui = herramientasEnObra(herrCat, herrEstados, obraId);
+  const herrResumen = resumenInventario(herrCat, herrEstados, ubicObra(obraId));
+  const sinResguardo = herrAqui.filter(r => !r.responsable).length;
+  const enReparacion = herrAqui.filter(r => r.herramienta.estado === 'reparacion').length;
+
+  const herramientaCard = h('div', { class: 'card' }, [
+    h('div', { class: 'row' }, [
+      h('h3', { style: { margin: 0 } }, '🔧 Herramienta y equipo'),
+      h('div', { style: { flex: 1 } }),
+      h('button', { class: 'btn', onClick: () => navigate(`/obras/${obraId}/herramientas`) }, 'Ver módulo →')
+    ]),
+    herrAqui.length === 0
+      ? h('div', { class: 'muted', style: { marginTop: '10px', fontSize: '12px' } },
+        'No hay herramienta asignada a esta obra. Tráela del almacén central desde el módulo.')
+      : h('div', { class: 'row', style: { marginTop: '12px', gap: '24px' } }, [
+        h('div', {}, [
+          h('div', { class: 'muted', style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.4px' } }, 'Piezas en obra'),
+          h('div', { style: { fontSize: '20px', fontWeight: 600, marginTop: '2px', color: 'var(--accent)' } }, num0(herrResumen.piezas))
+        ]),
+        h('div', {}, [
+          h('div', { class: 'muted', style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.4px' } }, 'Valor resguardado'),
+          h('div', { style: { fontSize: '14px', marginTop: '2px' } }, money(herrResumen.valor))
+        ]),
+        sinResguardo > 0 && h('div', { class: 'tag warn' }, `⚠ ${sinResguardo} sin resguardo asignado`),
+        enReparacion > 0 && h('div', { class: 'tag warn' }, `🔧 ${enReparacion} en reparación`)
+      ])
   ]);
 
   const cajaChicaCard = h('div', { class: 'card' }, [
@@ -158,7 +197,7 @@ export async function renderObra({ params }) {
   ]);
 
   renderShell(crumbs(obraId, meta.nombre), h('div', {}, [
-    headerCard, conceptosCard, materialesCard, accionesCard, cajaChicaCard
+    headerCard, conceptosCard, materialesCard, accionesCard, cajaChicaCard, herramientaCard
   ]));
 }
 

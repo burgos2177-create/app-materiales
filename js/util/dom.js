@@ -56,7 +56,9 @@ export function modal({ title, body, onConfirm, confirmLabel = 'Aceptar', cancel
       typeof body === 'string' ? h('div', {}, body) : body,
       h('div', { class: 'actions' }, [
         h('button', { class: 'btn ghost', onClick: () => close(false) }, cancelLabel),
-        h('button', { class: `btn ${danger ? 'danger' : 'primary'}`, onClick: async () => { const r = onConfirm ? await onConfirm() : true; close(r); } }, confirmLabel)
+        // onConfirm devuelve false = validación falló → el modal NO se cierra
+        // (si no, el usuario pierde lo capturado). Cualquier otro valor cierra.
+        h('button', { class: `btn ${danger ? 'danger' : 'primary'}`, onClick: async () => { const r = onConfirm ? await onConfirm() : true; if (r !== false) close(r); } }, confirmLabel)
       ])
     ]);
     backdrop = h('div', { class: 'modal-backdrop', onClick: (e) => { if (e.target === e.currentTarget) close(false); } }, card);
