@@ -43,7 +43,11 @@ export async function renderCatalogo({ params }) {
     if (!m) return;
     editMaterialMetaDialog({
       obraId, materialKey: id, material: m, items,
-      onSaved: (patch, changedFields) => {
+      onSaved: (patch, changedFields, result) => {
+        // Los ad-hoc pueden cambiar clave/descripción/unidad, lo que regenera el
+        // materialKey. Ahí no basta con mutar la fila: se recarga la vista para
+        // releer el catálogo con la key nueva y sus referencias ya migradas.
+        if (result) { renderCatalogo({ params: { id: obraId } }); return; }
         // Mutamos el item en memoria para reflejar en la lista de filtros y la fila.
         // Solo marcamos overrides en los campos que cambiaron (espejo de la lógica del DB).
         const overrides = { ...(m.manualOverrides || {}) };
@@ -221,7 +225,9 @@ function materialRow(id, m, conceptos, resueltos, opts = {}) {
     const editBtn = h('button', {
       class: 'btn ghost sm',
       style: { fontSize: '11px', padding: '2px 8px', whiteSpace: 'nowrap' },
-      title: 'Editar familia, subfamilia, marca y proveedor',
+      title: adHocFlag
+        ? 'Editar el material: clave, descripción, unidad, familia, marca y proveedor'
+        : 'Editar familia, subfamilia, marca y proveedor',
       onClick: (e) => { e.stopPropagation(); onEditMeta(id); }
     }, famMarca ? '✎ Editar' : '+ Asignar');
 
@@ -244,19 +250,31 @@ function materialRow(id, m, conceptos, resueltos, opts = {}) {
     famMarcaCell = h('td', { class: 'muted', style: { fontSize: '11px' } }, famMarca);
   }
 
+  // En los ad-hoc la identidad (clave / descripción / unidad) sí es corregible
+  // desde la app — la capturó una persona. El badge y la unidad son el atajo
+  // natural para llegar ahí, así que se vuelven clickables.
+  const editaAdHoc = adHocFlag && canEdit && onEditMeta;
+  const adHocTag = adHocFlag ? h(editaAdHoc ? 'button' : 'span', {
+    class: 'tag',
+    style: {
+      marginLeft: '4px', fontSize: '10px', ...(editaAdHoc ? { cursor: 'pointer', border: 'none' } : {})
+    },
+    title: editaAdHoc
+      ? 'Corregir este material (clave, descripción, unidad…)'
+      : isAdHocCompras(m.origen) ? 'Material creado por compras' : 'Material creado por el almacenista en obra',
+    onClick: editaAdHoc ? ((e) => { e.stopPropagation(); onEditMeta(id); }) : null
+  }, origenLabel(m.origen) + (editaAdHoc ? ' ✎' : '')) : null;
+
   return h('tr', {}, [
-    h('td', { class: 'mono', style: { fontSize: '11px' } }, [
-      m.clave,
-      adHocFlag ? h('span', {
-        class: 'tag',
-        style: { marginLeft: '4px', fontSize: '10px' },
-        title: isAdHocCompras(m.origen)
-          ? 'Material creado por compras'
-          : 'Material creado por el almacenista en obra'
-      }, origenLabel(m.origen)) : null
-    ]),
+    h('td', { class: 'mono', style: { fontSize: '11px' } }, [m.clave, adHocTag]),
     h('td', { style: { maxWidth: '380px', overflow: 'hidden', textOverflow: 'ellipsis' }, title: m.descripcion }, m.descripcion),
-    h('td', {}, m.unidad),
+    editaAdHoc
+      ? h('td', {}, h('span', {
+        style: { cursor: 'pointer', borderBottom: '1px dashed var(--border-strong)' },
+        title: 'Corregir la unidad',
+        onClick: (e) => { e.stopPropagation(); onEditMeta(id); }
+      }, m.unidad))
+      : h('td', {}, m.unidad),
     h('td', { class: 'num' }, num(m.cantidadOpus, 4)),
     h('td', { class: 'num' }, money(m.costoUnitario)),
     h('td', { class: 'num' }, money(m.importe)),

@@ -3,6 +3,8 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-database.js';
 import { db } from './firebase.js';
 import { APP_BASE_PATH } from '../config/firebase-config.js';
+import { isAdHoc } from './origen.js';
+import { computeMaterialKey } from './material-keys.js';
 
 // Prefija toda path relativa con APP_BASE_PATH (e.g. "obras/X/catalogo" →
 // "shared/materiales/obras/X/catalogo"). Para escapes que apunten fuera del
@@ -201,6 +203,143 @@ export async function bulkUpdateMaterialMeta(obraId, updatesByKey, editor) {
   if (Object.keys(patches).length === 0) return { affected: 0 };
   await update(_ref(`obras/${obraId}/catalogo`), patches);
   return { affected: keys.length };
+}
+
+// === Edición de materiales ad-hoc (clave / descripción / unidad) ===
+//
+// Un material ad-hoc lo capturó una persona, así que puede tener errores de
+// dedo — y la unidad equivocada arruina el consumo y el costeo. Los de OPUS NO
+// se editan aquí: se corrigen en OPUS y se re-importan (esta app no es su
+// autoridad).
+//
+// El problema: `materialKey = {clave}_{hash6(tipo|clave|descripcion|unidad)}`.
+// Cambiar cualquiera de los tres campos de identidad cambia la key, y si la
+// dejáramos vieja se rompería la propiedad que hace útil el ad-hoc: que OPUS lo
+// ABSORBA cuando exporte el mismo material (misma clave+descripción+unidad).
+// Por eso re-keyeamos y arrastramos todas las referencias.
+
+// Dónde se está usando un material. Lo usa el diálogo de edición para avisar
+// cuántos documentos se van a tocar antes de re-keyear.
+export async function countMaterialRefs(obraId, materialKey) {
+  const [reqs, recs, sals, buzon] = await Promise.all([
+    rread(`obras/${obraId}/requisiciones`),
+    rread(`obras/${obraId}/recepciones`),
+    rread(`obras/${obraId}/salidas`),
+    rread('/shared/buzon')
+  ]);
+  const contar = (all) => {
+    let n = 0;
+    for (const doc of Object.values(all || {})) {
+      for (const it of Object.values(doc?.items || {})) if (it?.materialKey === materialKey) n++;
+    }
+    return n;
+  };
+  let enBuzon = 0;
+  for (const item of Object.values(buzon || {})) {
+    if (!item || item.obraId !== obraId) continue;
+    const its = item.items;
+    if (!its || typeof its !== 'object') continue;
+    for (const it of Object.values(its)) if (it?.materialKey === materialKey) enBuzon++;
+  }
+  const out = {
+    requisiciones: contar(reqs), recepciones: contar(recs),
+    salidas: contar(sals), buzon: enBuzon
+  };
+  out.total = out.requisiciones + out.recepciones + out.salidas + out.buzon;
+  return out;
+}
+
+// Reescribe materialKey viejo → nuevo en todo lo que lo referencia dentro de la
+// obra, más los snapshots del buzón que siguen vivos (compras resuelve la
+// requisición contra el catálogo por materialKey).
+async function _rewriteMaterialKeyRefs(obraId, oldKey, newKey) {
+  let n = 0;
+  for (const col of ['requisiciones', 'recepciones', 'salidas']) {
+    const all = await rread(`obras/${obraId}/${col}`) || {};
+    for (const [docId, doc] of Object.entries(all)) {
+      const patch = {};
+      for (const [itemId, it] of Object.entries(doc?.items || {})) {
+        if (it?.materialKey === oldKey) patch[`${itemId}/materialKey`] = newKey;
+      }
+      const count = Object.keys(patch).length;
+      if (count > 0) { await rupdate(`obras/${obraId}/${col}/${docId}/items`, patch); n += count; }
+    }
+  }
+  const buzon = await rread('/shared/buzon') || {};
+  for (const [bid, item] of Object.entries(buzon)) {
+    if (!item || item.obraId !== obraId) continue;
+    const its = item.items;
+    if (!its || typeof its !== 'object') continue;
+    const patch = {};
+    for (const [k, it] of Object.entries(its)) {
+      if (it?.materialKey === oldKey) patch[`items/${k}/materialKey`] = newKey;
+    }
+    const count = Object.keys(patch).length;
+    if (count > 0) { await rupdate(`/shared/buzon/${bid}`, patch); n += count; }
+  }
+  return n;
+}
+
+// Edita un material ad-hoc completo. `patch` puede traer clave, descripcion,
+// unidad (identidad) y familia, subfamilia, marca, proveedor (meta).
+// Devuelve { rekeyed, newKey, refsActualizadas, changed }.
+export async function updateMaterialAdHoc(obraId, materialKey, patch, editor) {
+  const path = `obras/${obraId}/catalogo/items/${materialKey}`;
+  const current = await rread(path);
+  if (!current) throw new Error('Material no encontrado');
+  if (!isAdHoc(current.origen)) {
+    throw new Error('Solo los materiales ad-hoc pueden cambiar clave, descripción o unidad. Los de OPUS se corrigen en OPUS y se vuelven a importar.');
+  }
+
+  const pick = (f) => (patch[f] !== undefined ? patch[f] : current[f]);
+  const clave = (pick('clave') || '').toString().trim();
+  const descripcion = (pick('descripcion') || '').toString().trim();
+  const unidad = (pick('unidad') || '').toString().trim();
+  if (!clave || !descripcion || !unidad) throw new Error('Clave, descripción y unidad son obligatorios');
+
+  // Meta editable: se marca en manualOverrides igual que updateMaterialMeta,
+  // por consistencia si algún día OPUS absorbe este material.
+  const overrides = { ...(current.manualOverrides || {}) };
+  const meta = {};
+  let changed = 0;
+  for (const f of META_OVERRIDABLE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(patch, f)) continue;
+    const val = (patch[f] || '').toString().trim();
+    meta[f] = val;
+    if (val !== (current[f] || '').toString().trim()) { overrides[f] = true; changed++; }
+  }
+  const identidadCambio = clave !== (current.clave || '').trim() ||
+    descripcion !== (current.descripcion || '').trim() ||
+    unidad !== (current.unidad || '').trim();
+  if (identidadCambio) changed++;
+
+  const newKey = computeMaterialKey({ clave, descripcion, unidad });
+  const stamp = { editedAt: Date.now() };
+  if (editor) stamp.editedBy = editor;
+
+  if (newKey === materialKey) {
+    if (changed === 0) return { rekeyed: false, newKey, refsActualizadas: 0, changed: 0 };
+    await rupdate(path, { clave, descripcion, unidad, ...meta, manualOverrides: overrides, ...stamp });
+    return { rekeyed: false, newKey, refsActualizadas: 0, changed };
+  }
+
+  // Re-key: la clave interna cambia, así que hay que mudar el registro y
+  // arrastrar todas las referencias. Si ya existe otro material con esa misma
+  // identidad, fusionarlos automáticamente sería destructivo — mejor pararlo.
+  const ocupada = await rread(`obras/${obraId}/catalogo/items/${newKey}`);
+  if (ocupada) {
+    throw new Error(`Ya existe otro material con esa clave, descripción y unidad ("${ocupada.descripcion || ''}"). Usa ese en lugar de duplicarlo.`);
+  }
+
+  // Orden: primero el nuevo, luego las referencias, y hasta el final se borra el
+  // viejo — si algo falla a medias, nada queda apuntando al vacío.
+  await rset(`obras/${obraId}/catalogo/items/${newKey}`, {
+    ...current, clave, descripcion, unidad, ...meta,
+    manualOverrides: overrides, keyAnterior: materialKey, ...stamp
+  });
+  const refsActualizadas = await _rewriteMaterialKeyRefs(obraId, materialKey, newKey);
+  await rremove(path);
+  return { rekeyed: true, newKey, refsActualizadas, changed };
 }
 
 // === Salidas ===

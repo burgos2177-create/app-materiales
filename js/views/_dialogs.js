@@ -10,7 +10,10 @@
 
 import { h, modal, toast } from '../util/dom.js';
 import { state } from '../state/store.js';
-import { createMaterialAdHoc, updateMaterialMeta, bulkUpdateMaterialMeta } from '../services/db.js';
+import {
+  createMaterialAdHoc, updateMaterialMeta, bulkUpdateMaterialMeta,
+  updateMaterialAdHoc, countMaterialRefs
+} from '../services/db.js';
 import { computeMaterialKey } from '../services/material-keys.js';
 import { isAdHoc, isAdHocCompras, origenLabel } from '../services/origen.js';
 
@@ -1031,14 +1034,52 @@ export function editMaterialMetaDialog({
   const overrides = material.manualOverrides || {};
   const yaEditados = ['familia', 'subfamilia', 'marca', 'proveedor'].filter(f => overrides[f]);
 
-  const body = h('div', {}, [
-    h('div', { class: 'muted', style: { fontSize: '12px', marginBottom: '10px' } }, [
+  // Identidad (clave / descripción / unidad) SOLO es editable en materiales
+  // ad-hoc: los capturó una persona y pueden traer errores de dedo. Los de OPUS
+  // se corrigen allá y se re-importan — esta app no es su autoridad.
+  const editable = isAdHoc(material.origen);
+  const claveIn = h('input', { value: material.clave || '', placeholder: 'Clave' });
+  const descIn = h('input', { value: material.descripcion || '', placeholder: 'Descripción del material' });
+  const unidadIn = h('input', { value: material.unidad || '', placeholder: 'PZA, m, M3, KG…' });
+  const refsNota = h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '6px' } },
+    editable ? 'Revisando dónde se usa…' : '');
+
+  if (editable) {
+    // El aviso de impacto se carga aparte para no retrasar la apertura del modal.
+    countMaterialRefs(obraId, materialKey).then(refs => {
+      if (refs.total === 0) {
+        refsNota.textContent = 'Todavía no se usa en ningún documento: se puede corregir sin consecuencias.';
+        return;
+      }
+      const partes = [];
+      if (refs.requisiciones) partes.push(`${refs.requisiciones} en requisiciones`);
+      if (refs.recepciones) partes.push(`${refs.recepciones} en recepciones`);
+      if (refs.salidas) partes.push(`${refs.salidas} en salidas`);
+      if (refs.buzon) partes.push(`${refs.buzon} en el buzón`);
+      refsNota.textContent = `Se usa en ${refs.total} lugar(es): ${partes.join(', ')}. Si cambias clave, descripción o unidad, esas referencias se actualizan solas.`;
+    }).catch(() => { refsNota.textContent = ''; });
+  }
+
+  const identidadBlock = editable
+    ? h('div', {}, [
+      h('div', { class: 'grid-2' }, [
+        h('div', { class: 'field' }, [h('label', {}, 'Clave *'), claveIn]),
+        h('div', { class: 'field' }, [h('label', {}, 'Unidad *'), unidadIn])
+      ]),
+      h('div', { class: 'field', style: { marginTop: '8px' } }, [h('label', {}, 'Descripción *'), descIn]),
+      refsNota,
+      h('hr', { style: { border: 'none', borderTop: '1px solid var(--border)', margin: '14px 0' } })
+    ])
+    : h('div', { class: 'muted', style: { fontSize: '12px', marginBottom: '10px' } }, [
       h('div', {}, [
         h('span', { class: 'mono', style: { fontSize: '11px', marginRight: '6px' } }, material.clave),
         h('span', {}, material.descripcion)
       ]),
       h('div', { style: { fontSize: '11px', marginTop: '2px' } }, material.unidad || '')
-    ]),
+    ]);
+
+  const body = h('div', {}, [
+    identidadBlock,
     h('div', { class: 'grid-2' }, [
       h('div', { class: 'field' }, [h('label', {}, 'Familia'), familia]),
       h('div', { class: 'field' }, [h('label', {}, 'Subfamilia'), subfamilia])
@@ -1048,15 +1089,19 @@ export function editMaterialMetaDialog({
       h('div', { class: 'field' }, [h('label', {}, 'Proveedor'), proveedor])
     ]),
     famDL, subDL, marDL,
-    yaEditados.length > 0
+    editable
       ? h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '8px' } },
-          `Este material tiene ediciones manuales en: ${yaEditados.join(', ')}. Se mantienen al re-importar el XLS hasta que OPUS las absorba (subir el XLS exportado desde esta app).`)
-      : h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '8px' } },
-          'Los cambios persisten contra re-imports de OPUS. Exporta el XLS desde la obra y súbelo a OPUS para que también los tenga. Compras ve el cambio automáticamente.')
+          'Material ad-hoc: lo capturaste tú, así que se puede corregir por completo. Si cambias clave, descripción o unidad se regenera su identificador interno y se actualizan las referencias en requisiciones, recepciones, salidas y buzón.')
+      : yaEditados.length > 0
+        ? h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '8px' } },
+            `Este material tiene ediciones manuales en: ${yaEditados.join(', ')}. Se mantienen al re-importar el XLS hasta que OPUS las absorba (subir el XLS exportado desde esta app).`)
+        : h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '8px' } },
+            'Los cambios persisten contra re-imports de OPUS. Exporta el XLS desde la obra y súbelo a OPUS para que también los tenga. Compras ve el cambio automáticamente.')
   ]);
 
   modal({
-    title: 'Editar familia / marca', body, confirmLabel: 'Guardar', size: 'lg',
+    title: editable ? 'Editar material ad-hoc' : 'Editar familia / marca',
+    body, confirmLabel: 'Guardar', size: 'lg',
     onConfirm: async () => {
       const patch = {
         familia: familia.value,
@@ -1068,6 +1113,24 @@ export function editMaterialMetaDialog({
         const editor = state.user
           ? { uid: state.user.uid, displayName: state.user.displayName || state.user.email }
           : null;
+
+        if (editable) {
+          const cl = claveIn.value.trim(), de = descIn.value.trim(), un = unidadIn.value.trim();
+          if (!cl || !de || !un) { toast('Clave, descripción y unidad son obligatorios', 'danger'); return false; }
+          const res = await updateMaterialAdHoc(
+            obraId, materialKey, { ...patch, clave: cl, descripcion: de, unidad: un }, editor);
+          if (res.changed === 0) { toast('Sin cambios'); return true; }
+          toast(res.rekeyed
+            ? `Material actualizado${res.refsActualizadas ? ` · ${res.refsActualizadas} referencia(s) migradas` : ''}`
+            : 'Material actualizado', 'ok');
+          if (onSaved) {
+            onSaved(
+              { familia: patch.familia.trim(), subfamilia: patch.subfamilia.trim(), marca: patch.marca.trim(), proveedor: patch.proveedor.trim(), clave: cl, descripcion: de, unidad: un },
+              {}, res);
+          }
+          return true;
+        }
+
         const { changed } = await updateMaterialMeta(obraId, materialKey, patch, editor);
         // Devolver los valores normalizados (trim) y los campos efectivamente
         // modificados para que la vista refresque sin re-leer.
